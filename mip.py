@@ -1,16 +1,17 @@
 #! /usr/bin/env python
 # -*- coding: utf-8 -*-
-"""mip
+"""mip.py
 
 A utility to call mip from the command line
 
 Usage:
-  mip.py <myfile> [--PDF]
+  mip.py <myfile> [--PDF --log]
   mip.py -h | --help
 
 Options:
   -h --help     Show this screen.
-  --PDF         Print PDF
+  --PDF         Print PDF to current directory
+  --log         Take log of data first
 
 """
 
@@ -45,6 +46,13 @@ if __name__=='__main__': #check to see if we're being run from the command line
             except FileNotFoundError as er:
                 raise er
 
+            if arg['--log']:
+                import numpy as np
+                data = np.log(data)
+
+            #Trying to set the cmap here opens a new figure window
+            #need to set up kwargs for efficient argument passing
+            #plt.set_cmap('gnuplot2')
             #plot the data
             fig, ax = mip(data)
             #readjust the white space (maybe move this into main code later)
