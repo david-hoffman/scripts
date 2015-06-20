@@ -48,7 +48,10 @@ if __name__=='__main__': #check to see if we're being run from the command line
 
             if arg['--log']:
                 import numpy as np
-                data = np.log(data)
+                if data.min() > 0:
+                    data = np.log(data)
+                else:
+                    print(filename, 'had negative numbers, log not taken')
 
             #Trying to set the cmap here opens a new figure window
             #need to set up kwargs for efficient argument passing
