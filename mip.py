@@ -39,13 +39,11 @@ if __name__=='__main__': #check to see if we're being run from the command line
         if '.tif' in filename or '.tiff' in filename:
             #Import skimage so we have access to tiff loading
             from skimage.external import tifffile as tif
-
             #here's the real danger zone, did the user give us a real file?
             try:
                 data = tif.imread(filename)
             except FileNotFoundError as er:
                 raise er
-
             if arg['--log']:
                 import numpy as np
                 if data.min() > 0:
