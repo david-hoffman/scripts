@@ -8,14 +8,16 @@ import numpy as np
 import subprocess
 import pandas as pd
 
-#import our ability to read MRC files
+#import our ability to read and write MRC files
 from pysegtools.mrc import MRC
+import Mrc
 
 #import skimage components
 from skimage.external import tifffile as tif
 from peaks.stackanalysis import PSFStackAnalyzer
 
-from dphutils import slice_maker, fft_pad, Pupil, scale_uint16
+from dphutils import *
+from scipy.fftpack import ifftshift, fftshift, fftn
 
 class FakePSF(object):
     '''
@@ -68,6 +70,44 @@ class FakePSF(object):
         self.pupil.gen_psf([0])
 
         self.psf = scale_uint16(self.pupil.PSFi[0])
+
+    def gen_radialOTF(self):
+        psf = self.pupil.PSFi[0]
+
+        #need to add bit to move max to center.
+        newpsf = psf-np.median(psf)
+        #recenter
+        #TODO: add this part
+
+        #pull the max size
+        nx = max(newpsf.shape)
+
+        #calculate the um^-1/pix
+        dkr = 1/(nx*self.pixsize)
+        #save dkr for later
+        self.dkr = dkr
+        #calculate the kspace cutoff, round up (that's what the 0.5 is for)
+        krcutoff = int(2*self.NA/(self.det_wl/1000)/dkr + .5)
+
+        self.radprof = calc_radial_OTF(newpsf, krcutoff)
+
+    def save_radOTF_mrc(self, output_filename, **kwargs):
+        #make empty header
+        header = Mrc.makeHdrArray()
+        #initialize it
+        #set type and shape
+        Mrc.init_simple(header, 4,self.radprof.shape)
+        #set wavelength
+        header.wave = self.det_wl
+        #set number of wavelengths
+        header.NumWaves = 1
+        #set dimensions
+        header.d = (self.dkr,)*3
+        tosave = self.radprof.astype(np.complex64)
+        #save it
+        tosave = tosave.reshape(1,1,(len(tosave)))
+
+        Mrc.save(tosave, output_filename, hdr = header, **kwargs)
 
     def save_PSF_mrc(self, output_filename):
         '''
@@ -134,18 +174,16 @@ class PSFFinder(object):
 
         fits.SNR = np.round(fits.SNR).astype(int)
         #find min sigma_z peak
-        best_fit = fits.sort(['SNR','sigma_z'],ascending=[False,True]).iloc[0]
+        self.fits = fits.sort(['SNR','sigma_z'],ascending=[False,True])
 
-        self.best_blob = best_fit
-
-    def find_window(self):
+    def find_window(self, blob_num = 0):
         '''
         Finds the biggest window distance.
         '''
 
         #pull all blobs
         blobs = self.all_blobs
-        best = np.round(self.best_blob[['y0', 'x0', 'sigma_x','amp']].values).astype(int)
+        best = np.round(self.fits.iloc[blob_num][['y0', 'x0', 'sigma_x','amp']].values).astype(int)
 
 
         def calc_r(blob1, blob2):
@@ -176,6 +214,59 @@ class PSFFinder(object):
         window = [self.best_blob.z0] + slice_maker(best[0], best[1], win_size)
 
         self.best_blob_data = self.psfstackanalyzer.stack[window]
+
+    def gen_radialOTF(self, lf_cutoff = None):
+        '''
+        Generate the Radially averaged OTF from the sample data.
+        '''
+        img_raw = self.best_blob_data
+
+        if img_raw.shape[0] < 512:
+            img = fft_pad(img_raw, 512)
+        else:
+            img = fft_pad(img_raw)
+
+        #need to add bit to move max to center.
+        newpsf = img-np.median(img)
+        #recenter
+        #TODO: add this part
+
+        #pull the max size
+        nx = max(newpsf.shape)
+
+        #calculate the um^-1/pix
+        dkr = 1/(nx*self.pixsize)
+        #save dkr for later
+        self.dkr = dkr
+        #calculate the kspace cutoff, round up (that's what the 0.5 is for)
+        krcutoff = int(2*self.NA/(self.det_wl/1000)/dkr + .5)
+
+        radprof = calc_radial_OTF(newpsf, krcutoff)
+
+        if lf_cutoff is not None:
+            lf_num = int(lf_cutoff/dkr + .5)
+            radprof[:lf_num] = radprof[lf_num]
+            radprof /= radprof.max()
+
+        self.radprof = radprof
+
+    def save_radOTF_mrc(self, output_filename, **kwargs):
+        #make empty header
+        header = Mrc.makeHdrArray()
+        #initialize it
+        #set type and shape
+        Mrc.init_simple(header, 4,self.radprof.shape)
+        #set wavelength
+        header.wave = self.det_wl
+        #set number of wavelengths
+        header.NumWaves = 1
+        #set dimensions
+        header.d = (self.dkr,)*3
+        tosave = self.radprof.astype(np.complex64)
+        #save it
+        tosave = tosave.reshape(1,1,(len(tosave)))
+
+        Mrc.save(tosave, output_filename, hdr = header, **kwargs)
 
     def save_PSF_mrc(self, output_filename):
         '''
@@ -257,3 +348,40 @@ def calc_radial_mrc(infile, outfile = None, NA = 0.85, L = 8, H = 22):
     return_code = subprocess.call([r'C:\newradialft\otf2d', '-N', str(NA), '-L', str(L), '-H', str(H), infile, outfile])
 
     return return_code
+
+def calc_radial_OTF(psf, krcutoff = None):
+    '''
+    Calculate radially averaged OTF given a PSF and a cutoff value.
+
+    This is designed to work well with Lin's SIMRecon software
+
+    Parameters
+    ----------
+    psf : ndarray, 2-dim, real
+        The psf from which to calculate the OTF
+    krcutoff : int
+        The diffraction limit in pixels.
+
+    Returns
+    -------
+    radprof : ndarray, 1-dim, complex
+        Radially averaged OTF
+    '''
+    #need to add bit to move max to center.
+    newpsf = psf-np.median(psf)
+    #recenter
+    #TODO: add this part
+
+    #fft
+    otf = ifftshift(fftn(fftshift(newpsf)))
+    center = np.array(otf.shape)/2
+
+    radprof = (radial_profile(np.real(otf),center)+radial_profile(np.imag(otf),center)*1j)[:int(center[0]+1)]
+
+    radprof /= radprof.max()
+
+    if krcutoff is not None:
+        #set everything beyond the diffraction limit to 0
+        radprof[krcutoff:] = 0
+
+    return radprof
