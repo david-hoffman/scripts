@@ -12,6 +12,7 @@ __license__ = "BSD license - see LICENSE file"
 
 import numpy as N
 import os, builtins
+import warnings
 
 #Set up module global variables
 # first field is data type
@@ -21,7 +22,7 @@ mrcHdrFields = [
     ('1i4', 'PixelType'),
     ('3i4', 'mst'),
     ('3i4', 'm'),
-    ('3f4', 'd'),
+    ('3f4', 'd'), #pixel dimensions
     ('3f4', 'angle'),
     ('3i4', 'axis'),
     ('3f4', 'mmm1'),
@@ -293,7 +294,7 @@ class Mrc:
         return data
 
     def close(self):
-        self.m.close()
+        del self.m
 
 
 
@@ -372,10 +373,11 @@ def save(a, fn, ifExists = 'ask', zAxisOrder = None,
             '''
             return (a.min(), a.max())
 
-        def mmm(a):
+        def mmm(b):
             '''
             return (min, max, mean)
             '''
+            a = N.real(b)
             return (a.min(), a.max(), a.mean())
 
         wAxis = axisOrderStr(m.hdr).find('w')
@@ -1006,11 +1008,15 @@ def init_simple(hdr, mode, nxOrShape, ny=None, nz=None):
     note: if  nxOrShape is tuple it is nz,ny,nx (note the order!!)
     """
     if ny is nz is None:
-        if len(nxOrShape) == 2:
+
+        length = len(nxOrShape)
+
+
+        if length == 2:
             nz,(ny,nx)  = 1, nxOrShape
-        elif len(nxOrShape) == 1:
-            nz,ny,nx  = 1, 1, nxOrShape
-        elif len(nxOrShape) == 3:
+        elif length == 1:
+            nz,ny,(nx,)  = 1, 1, nxOrShape
+        elif length == 3:
             nz,ny,nx  = nxOrShape
         else:
             ny,nx  = nxOrShape[-2:]
@@ -1019,7 +1025,7 @@ def init_simple(hdr, mode, nxOrShape, ny=None, nz=None):
     else:
         nx = nxOrShape
 
-    hdr.Num = (nx,ny,nz)
+    hdr.Num = [nx,ny,nz]
     hdr.PixelType = mode
     hdr.mst = (0,0,0) # 20060614: bugfixed was: (1,1,1))
     hdr.m   = (1,1,1)  # CHECK : should be nx,ny,nz ??
@@ -1083,6 +1089,8 @@ def initHdrArrayFrom(hdrDest, hdrSrc): #, mode, nxOrShape, ny=None, nz=None):
     else:
         nx = nxOrShape
     '''
+
+    #TODO: there has got to be a more pythonic way of doing this....
     #  hdrDest.PixelType = .hdr.PixelType
     hdrDest.mst = hdrSrc.mst
     hdrDest.m = hdrSrc.m
@@ -1123,7 +1131,9 @@ def initHdrArrayFrom(hdrDest, hdrSrc): #, mode, nxOrShape, ny=None, nz=None):
     hdrDest.title = hdrSrc.title
 
 def setTitle(hdr, s, i=-1):
-    """set title i (i==-1 means "append") to s"""
+    """
+    set title i (i==-1 means "append") to s
+    """
 
     n = hdr.NumTitles
 
