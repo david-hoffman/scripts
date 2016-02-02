@@ -76,8 +76,6 @@ class FakePSF(object):
 
         #need to add bit to move max to center.
         newpsf = psf-np.median(psf)
-        #recenter
-        #TODO: add this part
 
         #pull the max size
         nx = max(newpsf.shape)
@@ -121,6 +119,8 @@ class FakePSF(object):
 class PSFFinder(object):
 
     def __init__(self, stack, psfwidth = 1.68, NA = 0.85, pixsize = 0.0975, det_wl = 520, window_width = 20, **kwargs):
+        #TODO: refactor code so that PSFStackAnalyzer is replaced with PeakFinder
+        #of the maximum intensity projection along z. The rest should be the same.
         self.psfstackanalyzer = PSFStackAnalyzer(stack, psfwidth, **kwargs)
         self.all_blobs = self.psfstackanalyzer.peakfinder.blobs
         self.NA = NA
@@ -184,6 +184,10 @@ class PSFFinder(object):
         #pull all blobs
         blobs = self.all_blobs
         best = np.round(self.fits.iloc[blob_num][['y0', 'x0', 'sigma_x','amp']].values).astype(int)
+        #Now that we can simply take the 3D OTF and calculate and save the radially
+        #averaged 2D OTF directly I think we can skip the task of fitting the stack
+        #and instead just fit the max intensity projection.
+        #best = np.round(self.psfstackanalyzer.peakfinder.blobs[blob_num]).astype(int)
 
 
         def calc_r(blob1, blob2):
@@ -211,28 +215,23 @@ class PSFFinder(object):
         #now window size equals sqrt or this
         win_size = int(round(2*(r_min/np.sqrt(2) - best[2]*3)))
 
-        window = [self.best_blob.z0] + slice_maker(best[0], best[1], win_size)
+        window = slice_maker(best[0], best[1], win_size)
+        self.window = window
 
-        self.best_blob_data = self.psfstackanalyzer.stack[window]
-
-    def gen_radialOTF(self, lf_cutoff = None):
+    def gen_radialOTF(self, lf_cutoff = 0.1, width = 3, **kwargs):
         '''
         Generate the Radially averaged OTF from the sample data.
         '''
-        img_raw = self.best_blob_data
 
-        if img_raw.shape[0] < 512:
-            img = fft_pad(img_raw, 512)
+        img_raw = self.psfstackanalyzer.stack[[slice(None, None, None)] + self.window]
+
+        if img_raw.shape[-1] < 512 or img_raw.shape[-2] < 512:
+            img = fft_pad(img_raw, (nextpow2(img_raw.shape[0]),512, 512))
         else:
             img = fft_pad(img_raw)
 
-        #need to add bit to move max to center.
-        newpsf = img-np.median(img)
-        #recenter
-        #TODO: add this part
-
-        #pull the max size
-        nx = max(newpsf.shape)
+        #pull the max x, y size
+        nx = max(img.shape[-1:-3:-1])
 
         #calculate the um^-1/pix
         dkr = 1/(nx*self.pixsize)
@@ -241,11 +240,30 @@ class PSFFinder(object):
         #calculate the kspace cutoff, round up (that's what the 0.5 is for)
         krcutoff = int(2*self.NA/(self.det_wl/1000)/dkr + .5)
 
-        radprof = calc_radial_OTF(newpsf, krcutoff)
+        radprof = calc_radial_OTF(img, krcutoff, **kwargs)
 
         if lf_cutoff is not None:
-            lf_num = int(lf_cutoff/dkr + .5)
-            radprof[:lf_num] = radprof[lf_num]
+            #if given a cutoff linearly fit the points around it to a line
+            #then interpolate the line back to the origin starting at the low
+            #frequency
+
+            #find the cutoff in terms of pixels
+            mid_num = int(lf_cutoff/dkr + .5)
+
+            #choose the low frequency
+            lf = mid_num-width
+            if lf > 0:
+                #if the low frequency is higher than the DC component then
+                #proceed with the fit, we definitely don't want to include the DC
+                hf = mid_num+width
+                m, b = np.polyfit(np.arange(lf,hf), radprof[lf:hf],1)
+
+                radprof[:mid_num] = np.arange(0,mid_num)*m + b
+
+            else:
+                #set DC to mid_num to mid_num
+                radprof[:mid_num] = radprof[mid_num]
+
             radprof /= radprof.max()
 
         self.radprof = radprof
@@ -331,9 +349,12 @@ def calc_radial_mrc(infile, outfile = None, NA = 0.85, L = 8, H = 22):
     '''
 
     #TODO: Error checking
-
+    #make sure we have the absolute path
+    infile = os.path.abspath(infile)
     if outfile is None:
         outfile = infile.replace('.mrc','_otf2d.mrc')
+    else:
+        outfile = os.path.abspath(outfile)
 
     #write our string to send to the shell
     #8 is the lower pixel and 22 is the higher pixel
@@ -349,7 +370,7 @@ def calc_radial_mrc(infile, outfile = None, NA = 0.85, L = 8, H = 22):
 
     return return_code
 
-def calc_radial_OTF(psf, krcutoff = None):
+def calc_radial_OTF(psf, krcutoff = None, show_OTF = False):
     '''
     Calculate radially averaged OTF given a PSF and a cutoff value.
 
@@ -374,6 +395,15 @@ def calc_radial_OTF(psf, krcutoff = None):
 
     #fft
     otf = ifftshift(fftn(fftshift(newpsf)))
+
+    if show_OTF:
+        from dphplotting.mip import mip
+        mip(np.log(abs(otf)))
+
+    if otf.ndim > 2:
+        #if we have a 3D OTF collapse it by summation along kz into a 2D OTF.
+        otf = otf.mean(0)
+
     center = np.array(otf.shape)/2
 
     radprof = (radial_profile(np.real(otf),center)+radial_profile(np.imag(otf),center)*1j)[:int(center[0]+1)]
