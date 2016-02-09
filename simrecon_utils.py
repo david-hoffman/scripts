@@ -370,6 +370,139 @@ def calc_radial_mrc(infile, outfile = None, NA = 0.85, L = 8, H = 22):
 
     return return_code
 
+def simrecon(input_file, output_file, OTF_file, **kwargs):
+    '''
+    A simple wrapper to Lin's sirecon.exe
+
+    Parameters
+    ----------
+    input_file : path
+        Path to file holding raw SIM data
+    output_file : path
+        Path to location to write reconstruction
+    OTF_file : path
+        Path to OTF file to use in reconstruction
+
+    Options
+    -------
+    ndirs : int (default is 3)
+        number of directions in data
+    nphases : int (default is 5)
+        number of phases in data
+    2lenses : bool
+        data acquired with 2 opposing objectives
+    bessel : bool
+        data acquired with Bessel beam SIM
+    fastSIM : bool
+        data acquired with fast live SIM
+    noff : int (default is 0)
+        number of switch-off images in NL SIM data
+    recalcarray : int (default is 1)
+        how many times do you want to re-calculuate overlapping arrays
+    inputapo : int
+        number of pixels to apodize the input data (-1 to cosine apodize)
+    forcemodamp : sequence of floats (f1 f2... f_norders)
+        force the modulation amplitude to be f1 and f2
+                If other than 3 phases are used, the -nphases flag must be used
+                 BEFORE the -forcemodamp flag
+    nok0search : bool
+        do not want to search for the best k0
+    nokz0 : bool
+        do not use kz0 plane in makeoverlaps() or assembly (for bad
+    k0searchAll : bool
+        search for k0 for every time point in a time series
+    k0angles : sequence of floats (f0 f1... f_(ndirs-1))
+        user supplied pattern angle list, the -ndirs flag must be used BEFORE
+        the -k0angles flag
+    fitonephase : bool
+        in 2D NLSIM for orders > 1, modamp's phase will be order 1 phase
+        multiplied by order; default is using fitted phases for all orders
+    noapodizeout : bool
+        do not want to apodize the output data
+    gammaApo : float
+        apodize the output data with a power function
+    zoomfact : float
+        factor by which to subdivide pixels laterally
+    zzoom : float
+        factor by which to subdivide pixels axially
+    zpadto : int
+        how many total sections after zero padding
+    explodefact : float
+        factor by which to exaggerate the order shifts for display
+    nofilteroverlaps : bool (default True)
+        (Used with explodefact) leave orders round (no filtering the overlapped regions)
+    nosuppress : bool
+        do not want to suppress singularity at OTF origins
+    suppressR : float
+        the radius of range
+    dampenOrder0 : bool
+        dampen order 0 in filterbands
+    noOrder0 : bool
+        do not use order 0 in assembly
+    noequalize : bool
+        no equalization of input data
+    equalizez : bool
+        to equalize images of all z sections and directions
+    equalizet : bool
+        to equalize all time points based on the first one
+    wiener : float (default 0.01)
+        set wiener constant
+    wienerInr : float (default is 0.00)
+        wiener constant of the final time point will be wiener + this number
+    background : float (default is 515)
+        set the constant background intensity
+    bgInExtHdr : bool
+        the background of each section is recorded in the extended header's 3rd
+        float number (in Lin's scope)
+    otfRA : bool
+        to use radially averaged OTFs
+    driftfix : bool
+        to estimate and then fix drift in 3D
+    driftHPcutoff : float
+        the cutoff frequency (fraction of lateral resolution limit) used in
+        high-pass Gaussian filter in determining drift (default 0.0)
+    fix2Ddrift : bool
+        to correct 2D drifts for each exposure within a pattern direction
+    fixphasestep : bool
+        to correct phase used in separation matrix based on within-direction drift correction
+    noff : int
+        number of switch-off images in nonlinear SIM
+    usecorr : path
+        use correction file to do flatfielding
+    nordersout : int
+        the number of orders to use in reconstruction. Use if different from (n_phases+1)/2
+    angle0 : float
+        the starting angle (in radians) of the patterns
+    negDangle : bool
+        use negative angle step
+    ls : float
+        the illumination pattern's line spacing (in microns)
+    na : float
+        the (effective) NA of the objective
+    nimm : float
+        the index of refraction of the immersion liquid
+    saveprefiltered : path
+        save separated bands into file
+    savealignedraw : path
+        save drift-corrected raw images into file
+    saveoverlaps : path
+        save overlaps by makeoverlaps() into file
+    help or h : bool
+        print this message
+    '''
+
+    # the list to pass to subprocess.call, this is just the beginning
+    exc_list = [r'C:\SIMrecon_svn\sirecon', input_file, output_file, OTF_file]
+    # insert default values into **kwargs here
+    # built exc_list
+
+    # return_code = subprocess.call([r'C:\newradialft\otf2d', '-N', str(NA), '-L', str(L), '-H', str(H), infile, outfile])
+
+    # return return_code
+
+def write_mrc(input_file):
+    raise NotImplementedError
+
 def calc_radial_OTF(psf, krcutoff = None, show_OTF = False):
     '''
     Calculate radially averaged OTF given a PSF and a cutoff value.
