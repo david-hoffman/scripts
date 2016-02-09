@@ -6,13 +6,11 @@ import os
 import numpy as np
 #need subprocess to run commands
 import subprocess
-import pandas as pd
 
 #import our ability to read and write MRC files
 import Mrc
 
 #import skimage components
-from skimage.external import tifffile as tif
 from peaks.stackanalysis import PSFStackAnalyzer
 
 from dphutils import *
@@ -24,7 +22,7 @@ class FakePSF(object):
     class found in dphutils.
     '''
 
-    def __init__(self, NA = 0.85, pixsize = 0.0975, det_wl = 520, n = 1.0):
+    def __init__(self, NA =0.85, pixsize =0.0975, det_wl =520, n =1.0):
         self.pupil = Pupil(1/(pixsize*1000), det_wl, NA, n)
         self.pixsize = pixsize
         #generate only the infocus
@@ -64,7 +62,7 @@ class FakePSF(object):
     #     return locals()
     # pixsize = property(**pixsize())
 
-    def gen_psf(self, size = 512):
+    def gen_psf(self, size=512):
         self.pupil.size = size
         self.pupil.gen_psf([0])
 
@@ -156,9 +154,9 @@ class PSFFinder(object):
 
         blobs_df.SNR = np.round(blobs_df.dropna().SNR).astype(int)
 
-        new_blobs_df = blobs_df[blobs_df.sigma_x < max_s].sort(['SNR','amp'],ascending=False).iloc[:num_peaks]
+        new_blobs_df = blobs_df[blobs_df.sigma_x < max_s].sort(['SNR','amp'], ascending=False).iloc[:num_peaks]
         #set the internal state to the selected blobs
-        my_PF.blobs = new_blobs_df[['y0','x0','sigma_x','amp']].values.astype(int)
+        my_PF.blobs = new_blobs_df[['y0', 'x0', 'sigma_x', 'amp']].values.astype(int)
 
     def find_best_psf(self):
         '''
@@ -173,9 +171,9 @@ class PSFFinder(object):
 
         fits.SNR = np.round(fits.SNR).astype(int)
         #find min sigma_z peak
-        self.fits = fits.sort(['SNR','sigma_z'],ascending=[False,True])
+        self.fits = fits.sort(['SNR','sigma_z'], ascending=[False, True])
 
-    def find_window(self, blob_num = 0):
+    def find_window(self, blob_num =0):
         '''
         Finds the biggest window distance.
         '''
@@ -417,3 +415,36 @@ def calc_radial_OTF(psf, krcutoff = None, show_OTF = False):
         radprof[krcutoff:] = 0
 
     return radprof
+
+def split_img(img, num_sub_imgs):
+    '''
+    A utility to split a SIM stack into substacks
+    '''
+
+    # Testing input
+    divisor = int(np.sqrt(num_sub_imgs))
+    side = img.shape[-1]//divisor
+    #Error checking
+    assert np.sqrt(num_sub_imgs) == divisor
+    assert side == img.shape[-1]/divisor, 'Side {}, not equal to {}/{}'.format(side, img.shape[-1],divisor)
+    assert img.shape[-2] == img.shape[-1]
+    assert np.product(img.shape[-1:-3:-1])/num_sub_imgs-np.product(img.shape[-1:-3:-1])//num_sub_imgs == 0
+
+    # reshape array so that it's a tiled image and roll one axis so that the
+    # tile's y, x coordinates are next to each other
+    img_s = np.rollaxis(img.reshape(-1, divisor, side, divisor, side), 3, 1)
+
+    # combine the tile's y, x coordinates into one axis.
+    return img_s.reshape(divisor**2, -1, side, side)
+
+def combine_img(img_stack):
+    '''
+    A utility to combine a processed stack.
+    '''
+
+    num_sub_imgs, ylen, xlen = img_stack.shape
+    divisor = int(np.sqrt(num_sub_imgs))
+    assert xlen == ylen, '{} != {}'.format(xlen,ylen)
+    assert np.sqrt(num_sub_imgs) == divisor
+
+    return np.rollaxis(img_stack.reshape(divisor, divisor, ylen, xlen),0,3).reshape(ylen*divisor, xlen*divisor)
