@@ -9,7 +9,6 @@ import subprocess
 import pandas as pd
 
 #import our ability to read and write MRC files
-from pysegtools.mrc import MRC
 import Mrc
 
 #import skimage components
@@ -132,7 +131,7 @@ class PSFFinder(object):
         self.find_best_psf()
         self.find_window()
 
-    def find_fit(self, max_s = 2.1, num_peaks = 10):
+    def find_fit(self, max_s = 2.1, num_peaks = 20):
         '''
         Function to find and fit blobs in the max intensity image
 
@@ -217,6 +216,8 @@ class PSFFinder(object):
 
         window = slice_maker(best[0], best[1], win_size)
         self.window = window
+
+        return window
 
     def gen_radialOTF(self, lf_cutoff = 0.1, width = 3, **kwargs):
         '''
@@ -318,6 +319,7 @@ def save_PSF_mrc(img, output_filename, pixsize = 0.0975, det_wl = 520):
     '''
 
     #TODO: make sure '.mrc' is appended to files that don't have it.
+    from pysegtools.mrc import MRC
 
     ny, nx = img.shape
     PSFmrc = MRC(output_filename,nx=nx,ny=ny,dtype=img.dtype)
