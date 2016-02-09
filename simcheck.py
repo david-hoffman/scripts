@@ -66,13 +66,13 @@ if __name__=='__main__': #check to see if we're being run from the command line
 
     orients = ['Orientation {}'.format(i) for i in range(norients)]
     #Plot everything and save
-    fig1, ax1 = display_grid({k : v for k,v in zip(orients, ft_data_avg_abs)}, figsize=6,
-            cmap ='gnuplot2', norm=LogNorm(), vmin = ft_data_avg_abs.min(), vmax = ft_data_avg_abs.max() )
+    fig1, ax1 = display_grid({k : v/v.max() for k,v in zip(orients, ft_data_avg_abs)}, figsize=6,
+            cmap ='gnuplot2', norm=LogNorm())
     filename1 = name + ' Average of Powers'
     fig1.suptitle(filename1, fontsize=16)
 
-    fig2, ax2 = display_grid({k : abs(v) for k,v in zip(orients, ft_data_avg)}, figsize=6,
-            cmap ='gnuplot2', norm=LogNorm(), vmin = abs(ft_data_avg).min(), vmax = abs(ft_data_avg).max())
+    fig2, ax2 = display_grid({k : abs(v/v.max()) for k,v in zip(orients, ft_data_avg)}, figsize=6,
+            cmap ='gnuplot2', norm=LogNorm())
     filename2 = name + ' Power of Average'
     fig2.suptitle(filename2, fontsize=16)
 
@@ -86,9 +86,14 @@ if __name__=='__main__': #check to see if we're being run from the command line
     # filename4 = name + ' Difference of Averages - Median Filter'
     # fig4.suptitle(filename4, fontsize=16)
 
+    def scale(v):
+    	mymin = v.min()
+    	mymax = v.max()
+    	return (v-mymin)/(mymax - mymin)
+
     filtered_ft_data_diff = gaussian_filter(ft_data_diff, (0,6,6))
-    fig5, ax5 = display_grid({k : v for k,v in zip(orients, filtered_ft_data_diff)},
-            figsize=6,cmap ='bwr', vmin = filtered_ft_data_diff.min(), vmax = filtered_ft_data_diff.max())
+    fig5, ax5 = display_grid({k : scale(v) for k,v in zip(orients, filtered_ft_data_diff)},
+            figsize=6,cmap ='bwr')
     filename5 = name + ' Difference of Averages - Gaussian Filter'
     fig5.suptitle(filename5, fontsize=16)
 
