@@ -4,6 +4,7 @@
 #import some os functionality so that we can be platform independent
 import os
 import numpy as np
+import matplotlib.pyplot as plt
 #need subprocess to run commands
 import subprocess
 
@@ -128,6 +129,7 @@ class PSFFinder(object):
         self.find_fit(2*psfwidth)
         self.find_best_psf()
         self.find_window()
+        self.gen_radialOTF()
 
     def find_fit(self, max_s = 2.1, num_peaks = 20):
         '''
@@ -216,6 +218,18 @@ class PSFFinder(object):
         self.window = window
 
         return window
+
+    def plot_window(self, blob_num, **kwargs):
+        '''
+        Plot all the things for this window
+        '''
+
+        self.find_window(blob_num)
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize =(12, 6))
+        ax1.matshow(self.psfstackanalyzer.peakfinder.data[self.window])
+        self.gen_radialOTF(show_OTF = True, **kwargs)
+        ax2.semilogy(abs(self.radprof))
+        fig.tight_layout()
 
     def gen_radialOTF(self, lf_cutoff = 0.1, width = 3, **kwargs):
         '''
@@ -531,7 +545,10 @@ def calc_radial_OTF(psf, krcutoff = None, show_OTF = False):
 
     if show_OTF:
         from dphplotting.mip import mip
-        mip(np.log(abs(otf)))
+        from matplotlib.colors import LogNorm
+        # this is still wrong, need to do the mean before summing
+        # really we need a slice function.
+        mip(abs(otf), func = np.mean, norm =LogNorm())
 
     if otf.ndim > 2:
         #if we have a 3D OTF collapse it by summation along kz into a 2D OTF.
