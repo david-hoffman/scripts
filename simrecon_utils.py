@@ -580,12 +580,14 @@ def split_img(img, num_sub_imgs):
     assert img.shape[-2] == img.shape[-1]
     assert np.product(img.shape[-1:-3:-1])/num_sub_imgs-np.product(img.shape[-1:-3:-1])//num_sub_imgs == 0
 
-    # reshape array so that it's a tiled image and roll one axis so that the
-    # tile's y, x coordinates are next to each other
-    img_s = np.rollaxis(img.reshape(-1, divisor, side, divisor, side), 3, 1)
-
+    # reshape array so that it's a tiled image
+    img_s0 = img.reshape(-1, divisor, side, divisor, side)
+    # roll one axis so that the tile's y, x coordinates are next to each other
+    img_s1 = np.rollaxis(img_s0, 3, 1)
     # combine the tile's y, x coordinates into one axis.
-    return img_s.reshape(divisor**2, -1, side, side)
+    img_s2 = img_s1.reshape(-1, divisor**2, side, side)
+    # roll axis so that we can easily iterate through tiles
+    return np.rollaxis(img_s2, 1, 0)
 
 def combine_img(img_stack):
     '''
