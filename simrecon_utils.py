@@ -546,6 +546,7 @@ def simrecon(input_file, output_file, OTF_file, **kwargs):
     # insert default values into **kwargs here
     # built exc_list
 
+    # TODO: verify kwargs, use update method
     KEYWORDS = OrderedDict()
     for k, kw_type in KEYWORDS.items():
         try:
