@@ -11,6 +11,7 @@ import subprocess
 # import our ability to read and write MRC files
 import Mrc
 
+from collections import OrderedDict
 # import skimage components
 from peaks.stackanalysis import PSFStackAnalyzer
 
@@ -544,6 +545,21 @@ def simrecon(input_file, output_file, OTF_file, **kwargs):
     exc_list = [r'C:\SIMrecon_svn\sirecon', input_file, output_file, OTF_file]
     # insert default values into **kwargs here
     # built exc_list
+
+    KEYWORDS = OrderedDict()
+    for k, kw_type in KEYWORDS.items():
+        try:
+            kw_value = kwargs[k]
+        except KeyError:
+            pass
+        else:
+            # test validity
+            assert isinstance(kw_value, kw_type)
+            
+            if kw_type is bool:
+                if kw_value:
+                    excstr.append('-'+k)
+
 
     # return_code = subprocess.call([r'C:\newradialft\otf2d', '-N', str(NA), '-L', str(L), '-H', str(H), infile, outfile])
 
