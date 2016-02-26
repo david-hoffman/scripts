@@ -16,7 +16,7 @@ from collections import OrderedDict, Sequence
 from peaks.stackanalysis import PSFStackAnalyzer
 
 from dphutils import *
-from scipy.fftpack import ifftshift, fftshift, fftn
+from pyfftw.interfaces.numpy_fft import ifftshift, fftshift, fftn, ifftn
 
 
 class FakePSF(object):
@@ -263,8 +263,8 @@ class PSFFinder(object):
 
         # fft
         otf = ifftshift(fftn(fftshift(psf)))
-
-        self.psf = abs(ifftshift(fftn(fftshift(otf.mean(0)))))
+        # ifft
+        self.psf = abs(ifftshift(ifftn(fftshift(otf.mean(0)))))
 
     def gen_radialOTF(self, lf_cutoff=0.1, width=3, **kwargs):
         '''
