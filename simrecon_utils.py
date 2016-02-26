@@ -11,7 +11,7 @@ import subprocess
 # import our ability to read and write MRC files
 import Mrc
 
-from collections import OrderedDict
+from collections import OrderedDict, Sequence
 # import skimage components
 from peaks.stackanalysis import PSFStackAnalyzer
 
@@ -78,13 +78,10 @@ class FakePSF(object):
         self.psf = scale_uint16(self.pupil.PSFi[0])
 
     def gen_radialOTF(self):
-        psf = self.pupil.PSFi[0]
-
-        # need to add bit to move max to center.
-        newpsf = psf-np.median(psf)
+        psf = self.pupil.PSFi[0].copy()
 
         # pull the max size
-        nx = max(newpsf.shape)
+        nx = max(psf.shape)
 
         # calculate the um^-1/pix
         dkr = 1/(nx*self.pixsize)
@@ -93,7 +90,7 @@ class FakePSF(object):
         # calculate the kspace cutoff, round up (that's what the 0.5 is for)
         krcutoff = int(2*self.NA/(self.det_wl/1000)/dkr + .5)
 
-        self.radprof = calc_radial_OTF(newpsf, krcutoff)
+        self.radprof = calc_radial_OTF(psf, krcutoff)
 
     def save_radOTF_mrc(self, output_filename, **kwargs):
         # make empty header
@@ -150,9 +147,9 @@ class PSFFinder(object):
 
         Parameters
         ----------
-        max_s : float
+        max_s: float
             Reject all peaks with a fit width greater than this
-        num_peaks : int
+        num_peaks: int
             The number of peaks to analyze further
         '''
         window_width = self.window_width
@@ -250,6 +247,25 @@ class PSFFinder(object):
         ax2.semilogy(abs(self.radprof))
         fig.tight_layout()
 
+    def calc_infocus_psf(self):
+        '''
+        Calculate the infocus psf
+        '''
+        img_raw = self.psfstackanalyzer.stack[
+            [slice(None, None, None)] + self.window
+        ]
+
+        img = fft_pad(img_raw)
+
+        psf = img.astype(float)-np.median(img)
+        # recenter
+        # TODO: add this part
+
+        # fft
+        otf = ifftshift(fftn(fftshift(psf)))
+
+        self.psf = abs(ifftshift(fftn(fftshift(otf.mean(0)))))
+
     def gen_radialOTF(self, lf_cutoff=0.1, width=3, **kwargs):
         '''
         Generate the Radially averaged OTF from the sample data.
@@ -343,13 +359,13 @@ def save_PSF_mrc(img, output_filename, pixsize=0.0975, det_wl=520):
 
     Parameters
     ----------
-    img : ndarray, rank 2
+    img: ndarray, rank 2
         The image to save
-    output_filename : path
+    output_filename: path
         The filename to output to
-    pixsize : float
+    pixsize: float
         the the pixel size in microns (size of the sensor pixel at the sample)
-    det_wl : float
+    det_wl: float
         the detection wavelength
     '''
 
@@ -417,154 +433,261 @@ def calc_radial_mrc(infile, outfile=None, NA=0.85, L=8, H=22):
     return return_code
 
 
-def simrecon(input_file, output_file, OTF_file, **kwargs):
+def simrecon(input_file, output_file, otf_file, return_data=False, **kwargs):
     '''
     A simple wrapper to Lin's sirecon.exe
 
     Parameters
     ----------
-    input_file : path
+    input_file: path
         Path to file holding raw SIM data
-    output_file : path
+    output_file: path
         Path to location to write reconstruction
-    OTF_file : path
+    OTF_file: path
         Path to OTF file to use in reconstruction
 
     Options
     -------
-    ndirs : int (default is 3)
+    ndirs: int (default is 3)
         number of directions in data
-    nphases : int (default is 5)
+    nphases: int (default is 5)
         number of phases in data
-    2lenses : bool
+    2lenses: bool
         data acquired with 2 opposing objectives
-    bessel : bool
+    bessel: bool
         data acquired with Bessel beam SIM
-    fastSIM : bool
+    fastSIM: bool
         data acquired with fast live SIM
-    noff : int (default is 0)
-        number of switch-off images in NL SIM data
-    recalcarray : int (default is 1)
+    recalcarray: int (default is 1)
         how many times do you want to re-calculuate overlapping arrays
-    inputapo : int
+    inputapo: int
         number of pixels to apodize the input data (-1 to cosine apodize)
-    forcemodamp : sequence of floats (f1 f2... f_norders)
+    forcemodamp: sequence of floats (f1 f2... f_norders)
         force the modulation amplitude to be f1 and f2
                 If other than 3 phases are used, the -nphases flag must be used
                  BEFORE the -forcemodamp flag
-    nok0search : bool
+    nok0search: bool
         do not want to search for the best k0
-    nokz0 : bool
+    nokz0: bool
         do not use kz0 plane in makeoverlaps() or assembly (for bad
-    k0searchAll : bool
+    k0searchAll: bool
         search for k0 for every time point in a time series
-    k0angles : sequence of floats (f0 f1... f_(ndirs-1))
+    k0angles: sequence of floats (f0 f1... f_(ndirs-1))
         user supplied pattern angle list, the -ndirs flag must be used BEFORE
         the -k0angles flag
-    fitonephase : bool
+    fitonephase: bool
         in 2D NLSIM for orders > 1, modamp's phase will be order 1 phase
         multiplied by order; default is using fitted phases for all orders
-    noapodizeout : bool
+    noapodizeout: bool
         do not want to apodize the output data
-    gammaApo : float
+    gammaApo: float
         apodize the output data with a power function
-    zoomfact : float
+    zoomfact: float
         factor by which to subdivide pixels laterally
-    zzoom : float
+    zzoom: float
         factor by which to subdivide pixels axially
-    zpadto : int
+    zpadto: int
         how many total sections after zero padding
-    explodefact : float
+    explodefact: float
         factor by which to exaggerate the order shifts for display
-    nofilteroverlaps : bool (default True)
+    nofilteroverlaps: bool (default True)
         (Used with explodefact) leave orders round
         (no filtering the overlapped regions)
-    nosuppress : bool
+    nosuppress: bool
         do not want to suppress singularity at OTF origins
-    suppressR : float
+    suppressR: float
         the radius of range
-    dampenOrder0 : bool
+    dampenOrder0: bool
         dampen order 0 in filterbands
-    noOrder0 : bool
+    noOrder0: bool
         do not use order 0 in assembly
-    noequalize : bool
+    noequalize: bool
         no equalization of input data
-    equalizez : bool
+    equalizez: bool
         to equalize images of all z sections and directions
-    equalizet : bool
+    equalizet: bool
         to equalize all time points based on the first one
-    wiener : float (default 0.01)
+    wiener: float (default 0.01)
         set wiener constant
-    wienerInr : float (default is 0.00)
+    wienerInr: float (default is 0.00)
         wiener constant of the final time point will be wiener + this number
-    background : float (default is 515)
+    background: float (default is 515)
         set the constant background intensity
-    bgInExtHdr : bool
+    bgInExtHdr: bool
         the background of each section is recorded in the extended header's 3rd
         float number (in Lin's scope)
-    otfRA : bool
+    otfRA: bool
         to use radially averaged OTFs
-    driftfix : bool
+    driftfix: bool
         to estimate and then fix drift in 3D
-    driftHPcutoff : float
+    driftHPcutoff: float
         the cutoff frequency (fraction of lateral resolution limit) used in
         high-pass Gaussian filter in determining drift (default 0.0)
-    fix2Ddrift : bool
+    fix2Ddrift: bool
         to correct 2D drifts for each exposure within a pattern direction
-    fixphasestep : bool
+    fixphasestep: bool
         to correct phase used in separation matrix based on within-direction
         drift correction
-    noff : int
+    noff: int
         number of switch-off images in nonlinear SIM
-    usecorr : path
+    usecorr: path
         use correction file to do flatfielding
-    nordersout : int
+    nordersout: int
         the number of orders to use in reconstruction. Use if different from
         (n_phases+1)/2
-    angle0 : float
+    angle0: float
         the starting angle (in radians) of the patterns
-    negDangle : bool
+    negDangle: bool
         use negative angle step
-    ls : float
+    ls: float
         the illumination pattern's line spacing (in microns)
-    na : float
+    na: float
         the (effective) NA of the objective
-    nimm : float
+    nimm: float
         the index of refraction of the immersion liquid
-    saveprefiltered : path
+    saveprefiltered: path
         save separated bands into file
-    savealignedraw : path
+    savealignedraw: path
         save drift-corrected raw images into file
-    saveoverlaps : path
+    saveoverlaps: path
         save overlaps by makeoverlaps() into file
-    help or h : bool
-        print this message
     '''
 
+    # make sure the paths are absolute paths
+    input_file = os.path.abspath(input_file)
+    output_file = os.path.abspath(output_file)
+    otf_file = os.path.abspath(otf_file)
     # the list to pass to subprocess.call, this is just the beginning
-    exc_list = [r'C:\SIMrecon_svn\sirecon', input_file, output_file, OTF_file]
+    exc_list = [r'C:\SIMrecon_svn\sirecon', input_file, output_file, otf_file]
     # insert default values into **kwargs here
-    # built exc_list
+    valid_kwargs = OrderedDict.fromkeys((
+        'ndirs',
+        'nphases',
+        '2lenses',
+        'bessel',
+        'fastSIM',
+        'recalcarray',
+        'inputapo',
+        'forcemodamp',
+        'nok0search',
+        'nokz0',
+        'k0searchAll',
+        'k0angles',
+        'fitonephase',
+        'noapodizeout',
+        'gammaApo',
+        'zoomfact',
+        'zzoom',
+        'zpadto',
+        'explodefact',
+        'nofilteroverlaps',
+        'nosuppress',
+        'suppressR',
+        'dampenOrder0',
+        'noOrder0',
+        'noequalize',
+        'equalizez',
+        'equalizet',
+        'wiener',
+        'wienerInr',
+        'background',
+        'bgInExtHdr',
+        'otfRA',
+        'driftfix',
+        'driftHPcutoff',
+        'fix2Ddrift',
+        'fixphasestep',
+        'noff',
+        'usecorr',
+        'nordersout',
+        'angle0',
+        'negDangle',
+        'ls',
+        'na',
+        'nimm',
+        'saveprefiltered',
+        'savealignedraw',
+        'saveoverlaps'
+    ))
 
-    # TODO: verify kwargs, use update method
-    KEYWORDS = OrderedDict()
-    for k, kw_type in KEYWORDS.items():
+    valid_kwargs.update({
+        'ndirs': int,
+        'nphases': int,
+        '2lenses': bool,
+        'bessel': bool,
+        'fastSIM': bool,
+        'recalcarray': int,
+        'inputapo': int,
+        'forcemodamp': Sequence,
+        'nok0search': bool,
+        'nokz0': bool,
+        'k0searchAll': bool,
+        'k0angles': Sequence,
+        'fitonephase': bool,
+        'noapodizeout': bool,
+        'gammaApo': float,
+        'zoomfact': float,
+        'zzoom': float,
+        'zpadto': int,
+        'explodefact': float,
+        'nofilteroverlaps': bool,
+        'nosuppress': bool,
+        'suppressR': float,
+        'dampenOrder0': bool,
+        'noOrder0': bool,
+        'noequalize': bool,
+        'equalizez': bool,
+        'equalizet': bool,
+        'wiener': float,
+        'wienerInr': float,
+        'background': float,
+        'bgInExtHdr': bool,
+        'otfRA': bool,
+        'driftfix': bool,
+        'driftHPcutoff': float,
+        'fix2Ddrift': bool,
+        'fixphasestep': bool,
+        'noff': int,
+        'usecorr': 'path',
+        'nordersout': int,
+        'angle0': float,
+        'negDangle': bool,
+        'ls': float,
+        'na': float,
+        'nimm': float,
+        'saveprefiltered': 'path',
+        'savealignedraw': 'path',
+        'saveoverlaps': 'path'
+    })
+
+    # update kwargs with those passed by user and generate the list.
+    for k, kw_type in valid_kwargs.items():
         try:
             kw_value = kwargs[k]
         except KeyError:
+            # user didn't pass this one, so skip
             pass
         else:
             # test validity
-            assert isinstance(kw_value, kw_type)
-            
+            if kw_type == 'path':
+                assert os.path.exists(kw_value), '{} is an invalid path'.format(kw_value)
+            else:
+                assert isinstance(kw_value, kw_type), '{} is type {} and should have been type {}'.format(k, type(kw_value), repr(kw_type))
             if kw_type is bool:
                 if kw_value:
-                    excstr.append('-'+k)
+                    exc_list.append('-'+k)
+            else:
+                exc_list.append('-'+k)
+                if isinstance(kw_value, Sequence):
+                    for k in kw_value:
+                        exc_list.append(str(k))
+                else:
+                    exc_list.append(str(kw_value))
 
+    # save the output
+    return_code = subprocess.check_output(exc_list)
 
-    # return_code = subprocess.call([r'C:\newradialft\otf2d', '-N', str(NA), '-L', str(L), '-H', str(H), infile, outfile])
-
-    # return return_code
+    return return_code.decode('utf-8').split('\n')
 
 
 def write_mrc(input_file):
@@ -579,18 +702,18 @@ def calc_radial_OTF(psf, krcutoff=None, show_OTF=False):
 
     Parameters
     ----------
-    psf : ndarray, 2-dim, real
+    psf: ndarray, 2-dim, real
         The psf from which to calculate the OTF
-    krcutoff : int
+    krcutoff: int
         The diffraction limit in pixels.
 
     Returns
     -------
-    radprof : ndarray, 1-dim, complex
+    radprof: ndarray, 1-dim, complex
         Radially averaged OTF
     '''
     # need to add bit to move max to center.
-    newpsf = psf-np.median(psf)
+    newpsf = psf.astype(float)-np.median(psf)
     # recenter
     # TODO: add this part
 
