@@ -16,7 +16,7 @@ from collections import OrderedDict, Sequence
 from peaks.stackanalysis import PSFStackAnalyzer
 
 from dphutils import *
-from scipy.fftpack import ifftshift, fftshift, fftn
+from pyfftw.interfaces.scipy_fftpack import ifftshift, fftshift, fftn
 
 
 class FakePSF(object):
@@ -783,3 +783,46 @@ def combine_img(img_stack):
     return np.rollaxis(
                         img_stack.reshape(divisor, divisor, ylen, xlen), 0, 3
                        ).reshape(ylen*divisor, xlen*divisor)
+
+
+def crop_mrc(fullpath, cropsize=512):
+    #open normal MRC file
+    oldmrc = MRC(fullpath)
+        
+    #make the crop path
+    croppath = fullpath.replace('.mrc','_cropped.mrc')
+    #crop window
+    def makeslice(length):
+        mid = length//2
+        
+        return slice(mid-cropsize//2,mid+cropsize//2)
+    
+    cropwinx= makeslice(oldmrc.nx)
+    cropwiny= makeslice(oldmrc.ny)
+    
+    #prepare a new file to write to
+    cropmrc = MRC(croppath, nx=cropsize,ny=cropsize,dtype=oldmrc.dtype)
+    for img in oldmrc:
+        cropmrc.append(img[cropwiny,cropwinx])
+        
+    #set the header
+    cropmrc.header['nwave'] =1 #detection wavelength
+    cropmrc.header['wave1'] =520 #detection wavelength
+    #need the rest of these fields filled out otherwise header won't write.
+    cropmrc.header['wave2'] =0
+    cropmrc.header['wave3'] =0
+    cropmrc.header['wave4'] =0
+    cropmrc.header['wave5'] =0
+    #fill in the pixel size
+    cropmrc.header['xlen'] = 0.0975
+    cropmrc.header['ylen'] = 0.0975
+
+    #need to delete this field to let MRC know that this is an oldstyle header to write
+    del cropmrc.header['cmap']
+
+    #write the header and close the file.
+    cropmrc.write_header()
+    cropmrc.close()
+    
+    oldmrc.close()
+    return croppath
