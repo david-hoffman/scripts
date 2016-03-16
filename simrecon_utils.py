@@ -13,7 +13,7 @@ import Mrc
 
 from collections import OrderedDict, Sequence
 # import skimage components
-from peaks.stackanalysis import PSFStackAnalyzer
+from peaks.peakfinder import PeakFinder
 
 from dphutils import *
 from pyfftw.interfaces.numpy_fft import ifftshift, fftshift, fftn, ifftn
@@ -92,6 +92,9 @@ class FakePSF(object):
 
         self.radprof = calc_radial_OTF(psf, krcutoff)
 
+        print('Better cutoff is {:3f}'.format(
+            abs(self.radprof).argmin()/(2/(self.det_wl/1000)/self.dkr)))
+
     def save_radOTF_mrc(self, output_filename, **kwargs):
         # make empty header
         header = Mrc.makeHdrArray()
@@ -124,20 +127,16 @@ class PSFFinder(object):
 
     def __init__(self, stack, psfwidth=1.68, NA=0.85, pixsize=0.0975,
                  det_wl=520, window_width=20, **kwargs):
-        # TODO: refactor code so that PSFStackAnalyzer is replaced
-        # with PeakFinder of the maximum intensity projection along z.
-        # The rest should be the same.
-        self.psfstackanalyzer = PSFStackAnalyzer(stack, psfwidth, **kwargs)
-        self.all_blobs = self.psfstackanalyzer.peakfinder.blobs
+        self.stack = stack
+        self.peakfinder = PeakFinder(stack.max(0), psfwidth, **kwargs)
+        self.peakfinder.find_blobs()
+        self.all_blobs = self.peakfinder.blobs
         self.NA = NA
         self.pixsize = pixsize
         self.det_wl = det_wl
         self.window_width = window_width
 
         self.find_fit(2*psfwidth)
-        self.find_best_psf()
-        self.find_window()
-        self.gen_radialOTF()
 
     def find_fit(self, max_s=2.1, num_peaks=20):
         '''
@@ -155,37 +154,26 @@ class PSFFinder(object):
         window_width = self.window_width
 
         # pull the PeakFinder object
-        my_PF = self.psfstackanalyzer.peakfinder
+        my_PF = self.peakfinder
+        # find blobs
+        my_PF.find_blobs()
         # prune blobs
         my_PF.remove_edge_blobs(window_width)
         my_PF.prune_blobs(window_width)
         # fit blobs in max intensity
         blobs_df = my_PF.fit_blobs(window_width)
-
+        # round to make sorting a little more meaningfull
         blobs_df.SNR = np.round(blobs_df.dropna().SNR).astype(int)
-
+        # sort by SNR then sigma_x.
         new_blobs_df = blobs_df[
                             blobs_df.sigma_x < max_s
-                    ].sort(['SNR', 'amp'], ascending=False).iloc[:num_peaks]
+                    ].sort(['SNR', 'sigma_x'], ascending=False).iloc[:num_peaks]
         # set the internal state to the selected blobs
         my_PF.blobs = new_blobs_df[
                                     ['y0', 'x0', 'sigma_x', 'amp']
                                 ].values.astype(int)
 
-    def find_best_psf(self):
-        '''
-        Of the initial guesses found with find_fit() this finds the best
-        '''
-        my_PFSA = self.psfstackanalyzer
-        my_PFSA.fitPeaks(self.window_width)
-
-        my_PFSA.calc_psf_params()
-
-        fits = my_PFSA.psf_params
-
-        fits.SNR = np.round(fits.SNR).astype(int)
-        # find min sigma_z peak
-        self.fits = fits.sort(['SNR', 'sigma_z'], ascending=[False, True])
+        self.fits = new_blobs_df
 
     def find_window(self, blob_num=0):
         '''
@@ -197,11 +185,6 @@ class PSFFinder(object):
         best = np.round(
             self.fits.iloc[blob_num][['y0', 'x0', 'sigma_x', 'amp']].values
             ).astype(int)
-        # Now that we can simply take the 3D OTF and calculate and save
-        # the radially averaged 2D OTF directly I think we can skip the
-        # task of fitting the stack and instead just fit the max intensity
-        # projection.
-        # best = np.round(self.psfstackanalyzer.peakfinder.blobs[blob_num]).astype(int)
 
         def calc_r(blob1, blob2):
             '''
@@ -224,7 +207,7 @@ class PSFFinder(object):
         except IndexError:
             # make r_min the size of the image
             r_min = min(
-                np.array(self.psfstackanalyzer.stack.shape[1:3])-best[:2]
+                np.array(self.stack.shape[1:3])-best[:2]
                 )
 
         # now window size equals sqrt or this
@@ -242,7 +225,7 @@ class PSFFinder(object):
 
         self.find_window(blob_num)
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
-        ax1.matshow(self.psfstackanalyzer.peakfinder.data[self.window])
+        ax1.matshow(self.peakfinder.data[self.window])
         self.gen_radialOTF(show_OTF=True, **kwargs)
         ax2.semilogy(abs(self.radprof))
         fig.tight_layout()
@@ -251,7 +234,7 @@ class PSFFinder(object):
         '''
         Calculate the infocus psf
         '''
-        img_raw = self.psfstackanalyzer.stack[
+        img_raw = self.stack[
             [slice(None, None, None)] + self.window
         ]
 
@@ -271,7 +254,7 @@ class PSFFinder(object):
         Generate the Radially averaged OTF from the sample data.
         '''
 
-        img_raw = self.psfstackanalyzer.stack[
+        img_raw = self.stack[
             [slice(None, None, None)] + self.window
         ]
 
@@ -318,6 +301,9 @@ class PSFFinder(object):
             radprof /= radprof.max()
 
         self.radprof = radprof
+
+        print('Better cutoff is {:.3f}'.format(
+            (self.radprof.argmin()-1)/(2/(self.det_wl/1000)/self.dkr)))
 
     def save_radOTF_mrc(self, output_filename, **kwargs):
         # make empty header
