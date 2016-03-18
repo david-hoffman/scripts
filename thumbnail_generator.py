@@ -50,7 +50,7 @@ def clean_dirname(dirname):
     return foldername + '\n' + filename
 
 
-def gen_thumbs(dirname, key='/*/*decon.tif', **kwargs):
+def gen_thumbs(dirname, key='/*/*decon.tif', where='host', **kwargs):
     '''
     Main function to generate and save thumbnail pngs
     '''
@@ -64,10 +64,19 @@ def gen_thumbs(dirname, key='/*/*decon.tif', **kwargs):
         # save the figure.
         # fig.savefig(os.path.join(dirname, 'Thumbs ' + foldername + '.png'),
         #             bbox_inches='tight')
-        fig.savefig('Thumbs ' + foldername + '.png',
-                    bbox_inches='tight')
-        # mark data for gc
+        if where == 'host':
+            save_name = 'Thumbs ' + foldername + '.png'
+        elif where == 'in folder':
+            save_name = os.path.abspath(
+                os.path.join(dirname, 'Thumbs ' + foldername + '.png'))
+        else:
+            save_name = os.path.abspath(
+                os.path.join(where, 'Thumbs ' + foldername + '.png'))
+        # save the figure
+        fig.savefig(save_name, bbox_inches='tight')
+    # mark data for gc
     del data
+
 
 def gen_all_thumbs(home, path_key='SIM', **kwargs):
     '''
