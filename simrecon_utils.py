@@ -166,8 +166,8 @@ class PSFFinder(object):
         blobs_df.SNR = np.round(blobs_df.dropna().SNR).astype(int)
         # sort by SNR then sigma_x.
         new_blobs_df = blobs_df[
-                            blobs_df.sigma_x < max_s
-                    ].sort(['SNR', 'sigma_x'], ascending=False).iloc[:num_peaks]
+                        blobs_df.sigma_x < max_s
+                ].sort(['SNR', 'sigma_x'], ascending=False).iloc[:num_peaks]
         # set the internal state to the selected blobs
         my_PF.blobs = new_blobs_df[
                                     ['y0', 'x0', 'sigma_x', 'amp']

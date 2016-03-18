@@ -3,6 +3,7 @@
 
 import os
 import glob
+import numpy as np
 import multiprocessing as mp
 from docopt import docopt
 from skimage.external import tifffile as tif
@@ -31,8 +32,17 @@ def load_data(dirname, key):
     Function to load all specified data matching glob into a dict
     and return the dict
     '''
-    return {fname: tif.imread(fname)
-            for fname in glob.iglob(dirname + key)
+
+    def better_imread(fname):
+        '''
+        Small utility to side step OME parsing error.
+        '''
+        with tif.TiffFile(fname) as mytif:
+            return np.squeeze(np.array([page.asarray()
+                                        for page in mytif.pages]))
+
+    return {fname: better_imread(fname)
+            for fname in glob.iglob(dirname + os.path.sep + key)
             if '.tif' in fname}
 
 
@@ -60,7 +70,7 @@ def gen_thumbs(dirname, key='/*/*decon.tif', where='host', **kwargs):
         # can clean the dirnames here
         data = {clean_dirname(k): v for k, v in data.items()}
         fig, ax = display_grid(data, **kwargs)
-        foldername = os.path.abspath(dirname).split(os.path.sep)[-2]
+        foldername = os.path.abspath(dirname).split(os.path.sep)[-1]
         # save the figure.
         # fig.savefig(os.path.join(dirname, 'Thumbs ' + foldername + '.png'),
         #             bbox_inches='tight')
@@ -73,9 +83,11 @@ def gen_thumbs(dirname, key='/*/*decon.tif', where='host', **kwargs):
             save_name = os.path.abspath(
                 os.path.join(where, 'Thumbs ' + foldername + '.png'))
         # save the figure
+        print('Saving', save_name)
         fig.savefig(save_name, bbox_inches='tight')
     # mark data for gc
     del data
+    return dirname + os.path.sep + key
 
 
 def gen_all_thumbs(home, path_key='SIM', **kwargs):
@@ -85,7 +97,8 @@ def gen_all_thumbs(home, path_key='SIM', **kwargs):
         results = [pool.apply_async(
                     gen_thumbs, args=(path,), kwds=kwargs
                 ) for path in find_paths(home, path_key)]
-        fits = [pp.get() for pp in results]
+        for pp in results:
+            pp.get()
     # for path in find_paths(home, path_key):
     #     gen_thumbs(path, **kwargs)
 
