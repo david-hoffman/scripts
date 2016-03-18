@@ -70,7 +70,7 @@ def gen_thumbs(dirname, key='/*/*decon.tif', where='host', **kwargs):
         # can clean the dirnames here
         data = {clean_dirname(k): v for k, v in data.items()}
         fig, ax = display_grid(data, **kwargs)
-        foldername = os.path.abspath(dirname).split(os.path.sep)[-1]
+        foldername = os.path.abspath(dirname).split(os.path.sep)[-2]
         # save the figure.
         # fig.savefig(os.path.join(dirname, 'Thumbs ' + foldername + '.png'),
         #             bbox_inches='tight')
