@@ -92,9 +92,6 @@ class FakePSF(object):
 
         self.radprof = calc_radial_OTF(psf, krcutoff)
 
-        print('Better cutoff is {:3f}'.format(
-            abs(self.radprof).argmin()/(2/(self.det_wl/1000)/self.dkr)))
-
     def save_radOTF_mrc(self, output_filename, **kwargs):
         # make empty header
         header = Mrc.makeHdrArray()
@@ -182,36 +179,43 @@ class PSFFinder(object):
 
         # pull all blobs
         blobs = self.all_blobs
-        best = np.round(
-            self.fits.iloc[blob_num][['y0', 'x0', 'sigma_x', 'amp']].values
-            ).astype(int)
+        # three different cases
+        if not len(blobs):
+            # no blobs in window, raise hell
+            raise RuntimeError("No blobs found, can't find window")
+        else:
+            # more than one blob find
+            best = np.round(
+                self.fits.iloc[blob_num][['y0', 'x0', 'sigma_x', 'amp']].values
+                ).astype(int)
 
-        def calc_r(blob1, blob2):
-            '''
-            Calc euclidean distance between blob1 and blob2
-            '''
-            y1, x1, s1, a1 = blob1
-            y2, x2, s2, a2 = blob2
+            def calc_r(blob1, blob2):
+                '''
+                Calc euclidean distance between blob1 and blob2
+                '''
+                y1, x1, s1, a1 = blob1
+                y2, x2, s2, a2 = blob2
 
-            return np.sqrt((y1 - y2)**2 + (x1 - x2)**2)
+                return np.sqrt((y1 - y2)**2 + (x1 - x2)**2)
 
-        # calc distances
-        r = np.array([calc_r(best, blob) for blob in blobs])
+            # calc distances
+            r = np.array([calc_r(best, blob) for blob in blobs])
 
-        # find min distances
-        # remember that best is in blobs so 0 will be in the list
-        # find the next value
-        r.sort()
-        try:
-            r_min = r[1]
-        except IndexError:
-            # make r_min the size of the image
-            r_min = min(
-                np.array(self.stack.shape[1:3])-best[:2]
-                )
+            # find min distances
+            # remember that best is in blobs so 0 will be in the list
+            # find the next value
+            r.sort()
+            try:
+                r_min = r[1]
+            except IndexError:
+                # make r_min the size of the image
+                r_min = min(
+                    np.concatenate((np.array(self.stack.shape[1:3])-best[:2],
+                                    best[:2]))
+                    )
 
-        # now window size equals sqrt or this
-        win_size = int(round(2*(r_min/np.sqrt(2) - best[2]*3)))
+            # now window size equals sqrt or this
+            win_size = int(round(2*(r_min/np.sqrt(2) - best[2]*3)))
 
         window = slice_maker(best[0], best[1], win_size)
         self.window = window
@@ -239,8 +243,13 @@ class PSFFinder(object):
         ]
 
         img = fft_pad(img_raw)
-
-        psf = img.astype(float)-np.median(img)
+        # estimate the background, use the mode.
+        try:
+            offset = np.bincount(img_raw.ravel()).argmax()
+        except TypeError:
+            offset = np.median(img_raw)
+        # remove background from PSF
+        psf = img.astype(float)-offset
         # recenter
         # TODO: add this part
 
@@ -303,7 +312,8 @@ class PSFFinder(object):
         self.radprof = radprof
 
         print('Better cutoff is {:.3f}'.format(
-            (self.radprof.argmin()-1)/(2/(self.det_wl/1000)/self.dkr)))
+            (self.radprof[:krcutoff].argmin() -
+             1)/(2/(self.det_wl/1000)/self.dkr)))
 
     def save_radOTF_mrc(self, output_filename, **kwargs):
         # make empty header
@@ -699,7 +709,13 @@ def calc_radial_OTF(psf, krcutoff=None, show_OTF=False):
         Radially averaged OTF
     '''
     # need to add bit to move max to center.
-    newpsf = psf.astype(float)-np.median(psf)
+    # estimate the background, use the mode.
+    try:
+        offset = np.bincount(psf.ravel()).argmax()
+    except TypeError:
+        offset = np.median(psf)
+    # remove background from PSF
+    newpsf = psf.astype(float)-offset
     # recenter
     # TODO: add this part
 
