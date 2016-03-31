@@ -430,7 +430,7 @@ def calc_radial_mrc(infile, outfile=None, NA=0.85, L=8, H=22):
     return return_code
 
 
-def simrecon(input_file, output_file, otf_file, return_data=False, **kwargs):
+def simrecon(*, input_file, output_file, otf_file, **kwargs):
     '''
     A simple wrapper to Lin's sirecon.exe
 
