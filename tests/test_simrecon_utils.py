@@ -36,8 +36,7 @@ def test_img_split_combine2():
     Testing that the split and combine functions work properly with real data
     '''
 
-    data_path = os.path.join('..', 'fixtures',
-                             '488 nm SIM 0.80_cam1_0.mrc')
+    data_path = os.path.join('fixtures', '488 nm SIM 0.80_cam1_0.mrc')
     data = Mrc(data_path).data
 
     # split data 4 ways and then take mean along second dimension

@@ -7,7 +7,7 @@ from nose.tools import *
 
 class InitializationTests(unittest.TestCase):
     '''
-    Initialization Tests
+    Initialization Tests for simrecon_utils
     '''
 
     def test_initialization(self):
