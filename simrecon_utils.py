@@ -747,20 +747,19 @@ def calc_radial_OTF(psf, krcutoff=None, show_OTF=False):
     return radprof
 
 
-def split_img(img, num_sub_imgs):
+def split_img(img, side):
     '''
     A utility to split a SIM stack into substacks
     '''
 
     # Testing input
-    divisor = int(np.sqrt(num_sub_imgs))
-    side = img.shape[-1]//divisor
+    divisor = img.shape[-1]//side
     # Error checking
     assert np.sqrt(num_sub_imgs) == divisor
     assert side == img.shape[-1]/divisor, 'Side {}, not equal to {}/{}'.format(
         side, img.shape[-1], divisor)
     assert img.shape[-2] == img.shape[-1]
-    assert np.product(img.shape[-1:-3:-1])/num_sub_imgs-np.product(img.shape[-1:-3:-1])//num_sub_imgs == 0
+    assert img.shape[-1] % divisor == 0
 
     # reshape array so that it's a tiled image
     img_s0 = img.reshape(-1, divisor, side, divisor, side)
