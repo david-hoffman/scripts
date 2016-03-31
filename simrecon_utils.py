@@ -3,11 +3,14 @@ SIMRecon Utility Functions
 '''
 # import some os functionality so that we can be platform independent
 import os
+import glob
+import re
 import numpy as np
 import matplotlib.pyplot as plt
 # need subprocess to run commands
 import subprocess
-
+import hashlib
+import shutil
 # import our ability to read and write MRC files
 import Mrc
 
@@ -819,3 +822,112 @@ def crop_mrc(fullpath, window=None, extension='_cropped'):
     del oldmrc
     return croppath
 
+
+def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
+                            extension='_split'):
+    '''
+    Method that splits then processes and then recombines images
+    '''
+    # open old Mrc
+    oldmrc = Mrc.Mrc(fullpath)
+    # pull data
+    old_data = oldmrc.data
+    # generate hex hash, will use as ID
+    sha = hashlib.md5(old_data).hexdigest()
+    sim_kwargs['sha'] = sha
+    # find local drive
+    local_drive = os.path.expanduser('~')
+    # make dir
+    dir_name = os.path.join(local_drive, 'split_recon_' + sha)
+    os.mkdir(dir_name)
+    split_data = split_img(old_data, tile_size)
+    # save split data
+    for i, data in enumerate(split_data):
+        nz, ny, nx = data.shape
+        # save subimages in sub folder, use sha as ID
+        savepath = os.path.join(dir_name,
+                                'sub_image{:03d}_{}.mrc'.format(i, sha))
+        Mrc.save(fft_pad(data, (nz, ny+padding, nx+padding), 'reflect'),
+                 savepath, hdr=oldmrc.hdr,
+                 ifExists='overwrite')
+    # process data
+    sirecon_ouput = []
+    for path in glob.iglob(dir_name+'/sub_image*_{}.mrc'.format(sha)):
+        # update the kwargs to have the input file.
+        sim_kwargs.update({
+            'input_file': path,
+            'output_file': path.replace('.mrc', '_proc.mrc')
+            })
+        sirecon_ouput += simrecon(**sim_kwargs)
+    # read in processed data
+    recon_split_data = np.array([Mrc.Mrc(path).data[0]
+                                 for path in sorted(glob.iglob(dir_name +
+                                                    '/sub_image*_{}_proc.mrc'.format(sha)))
+                                 ])
+    # recombine data, but trim padding first
+    recon_split_data_combine = combine_img(recon_split_data[:,
+                                                            padding:-padding,
+                                                            padding:-padding])
+    # save data
+    temp_mrc = Mrc.Mrc(savepath.replace('.mrc', '_proc.mrc'))
+    total_save_path = fullpath.replace('.mrc',
+                                       '_proc{}{}.mrc'.format(tile_size, extension))
+    Mrc.save(np.flipud(recon_split_data_combine),
+             total_save_path,
+             hdr=temp_mrc.hdr,
+             ifExists='overwrite')
+    # clean up
+    oldmrc.close()
+    del oldmrc
+    temp_mrc.close()
+    del temp_mrc
+    # kill folder
+    shutil.rmtree(dir_name)
+
+    return total_save_path, sirecon_ouput
+
+
+def process_txt_output(txt_buffer, ndirs):
+    '''
+    Take out put from above and parse into angles
+    '''
+    # compile the regexes
+    angle_re = re.compile('(?:amplitude:\n In.*)(?<=angle=)(-?\d+\.\d+)',
+                          flags=re.M)
+    mag_re = re.compile('(?:amplitude:\n In.*)(?<=mag=)(-?\d+\.\d+)',
+                        flags=re.M)
+    amp_re = re.compile('(?:amplitude:\n In.*)(?<=amp=)(-?\d+\.\d+)',
+                        flags=re.M)
+    phase_re = re.compile('(?:amplitude:\n In.*)(?<=phase=)(-?\d+\.\d+)',
+                          flags=re.M)
+    # parse output
+    my_angles = np.array(re.findall(angle_re, txt_buffer)).astype(float)
+    my_mags = np.array(re.findall(mag_re, txt_buffer)).astype(float)
+    my_amps = np.array(re.findall(amp_re, txt_buffer)).astype(float)
+    my_phases = np.array(re.findall(phase_re, txt_buffer)).astype(float)
+    # find sizes
+    assert len(my_angles) == len(my_mags) == len(my_amps) == len(my_phases)
+    nx = ny = int(np.sqrt(len(my_angles)//ndirs))
+    assert len(my_angles) * ndirs == nx * ny
+    # reshape all
+    for data in (my_angles, my_mags, my_amps, my_phases):
+        data.shape = (ny, nx, ndirs)
+    # plot
+    titles = ('Angles', 'Magnitudes', 'Amplitudes', 'Phase')
+    fig, axs = plt.subplots(4, 3, figsize=(3*4, 4*4))
+    for row, data, t in zip(axs, (my_angles, my_mags, my_amps, my_phases),
+                            titles):
+        for i, ax in enumerate(row):
+            # if angles we don't want absolute values.
+            if 'Angles' in t:
+                vmin = vmax = None
+            else:
+                vmin = data.min()
+                vmax = data.max()
+            # set the title for the middle row
+            if i == 1:
+                ax.set_title(t)
+            ax.matshow(data[..., i], vmin=vmin, vmax=vmax, cmap='seismic')
+            ax.axis('off')
+    fig.tight_layout()
+    return fig, axs
