@@ -15,7 +15,8 @@ from collections import OrderedDict, Sequence
 # import skimage components
 from peaks.peakfinder import PeakFinder
 
-from dphutils import *
+from dphutils import (slice_maker, Pupil, scale_uint16, fft_pad,
+                      nextpow2, radial_profile)
 from pyfftw.interfaces.numpy_fft import ifftshift, fftshift, fftn, ifftn
 
 
