@@ -755,7 +755,6 @@ def split_img(img, side):
     # Testing input
     divisor = img.shape[-1]//side
     # Error checking
-    assert np.sqrt(num_sub_imgs) == divisor
     assert side == img.shape[-1]/divisor, 'Side {}, not equal to {}/{}'.format(
         side, img.shape[-1], divisor)
     assert img.shape[-2] == img.shape[-1]
@@ -786,44 +785,36 @@ def combine_img(img_stack):
                        ).reshape(ylen*divisor, xlen*divisor)
 
 
-def crop_mrc(fullpath, cropsize=512):
-    #open normal MRC file
-    oldmrc = MRC(fullpath)
-        
-    #make the crop path
-    croppath = fullpath.replace('.mrc','_cropped.mrc')
-    #crop window
-    def makeslice(length):
-        mid = length//2
-        
-        return slice(mid-cropsize//2,mid+cropsize//2)
-    
-    cropwinx= makeslice(oldmrc.nx)
-    cropwiny= makeslice(oldmrc.ny)
-    
-    #prepare a new file to write to
-    cropmrc = MRC(croppath, nx=cropsize,ny=cropsize,dtype=oldmrc.dtype)
-    for img in oldmrc:
-        cropmrc.append(img[cropwiny,cropwinx])
-        
-    #set the header
-    cropmrc.header['nwave'] =1 #detection wavelength
-    cropmrc.header['wave1'] =520 #detection wavelength
-    #need the rest of these fields filled out otherwise header won't write.
-    cropmrc.header['wave2'] =0
-    cropmrc.header['wave3'] =0
-    cropmrc.header['wave4'] =0
-    cropmrc.header['wave5'] =0
-    #fill in the pixel size
-    cropmrc.header['xlen'] = 0.0975
-    cropmrc.header['ylen'] = 0.0975
+def crop_mrc(fullpath, window=None, extension='_cropped'):
+    '''
+    Small utility to crop MRC files
 
-    #need to delete this field to let MRC know that this is an oldstyle header to write
-    del cropmrc.header['cmap']
+    Parameters
+    ----------
+    fullpath : path
+        path to file
+    window : slice (optional)
+        crop window
 
-    #write the header and close the file.
-    cropmrc.write_header()
-    cropmrc.close()
-    
+    Returns
+    -------
+    croppath : path
+        path to cropped file
+    '''
+    # open normal MRC file
+    oldmrc = Mrc.Mrc(fullpath)
+    old_data = oldmrc.data
+    # make the crop path
+    croppath = fullpath.replace('.mrc', extension + '.mrc')
+    # crop window
+    if window is None:
+        nz, ny, nx = old_data.shape
+        window = [slice(None, None, None)] + slice_maker(ny//2, nx//2,
+                                                         max(ny, nx)//2)
+    # prepare a new file to write to
+    Mrc.save(old_data[window], croppath, ifExists='overwrite', hdr=oldmrc.hdr)
+    # close the old MRC file.
     oldmrc.close()
+    del oldmrc
     return croppath
+
