@@ -789,6 +789,39 @@ def combine_img(img_stack):
                        ).reshape(ylen*divisor, xlen*divisor)
 
 
+def split_img_with_padding(img, side, pad_width, mode='reflect'):
+    '''
+    Split SIM stack into sub-stacks with padding of pad_width
+    '''
+    if pad_width == 0:
+        return split_img(img, side)
+    # pull the shape of the image
+    nz, ny, nx = img.shape
+    # make sure the sides are equal
+    assert nx == ny
+    # make sure that side cleanly divides img dimensions
+    assert nx % side == 0
+    # pad the whole image
+    pad_img = fft_pad(img, (nz, pad_width + ny, pad_width + nx), mode)
+    # split the image into padded sub-images
+    split_pad_img = np.array([pad_img[...,
+                                      j*side:pad_width + (j+1)*side,
+                                      i*side:pad_width + (i+1)*side]
+                              for i in range(nx//side)
+                              for j in range(nx//side)])
+    # return this
+    return split_pad_img
+
+
+def combine_img_with_padding(img_stack, pad_width):
+    '''
+    Reverse of split_img_with_padding
+    '''
+    assert pad_width % 2 == 0
+    half_pad = pad_width//2
+    return combine_img(img_stack[..., half_pad:-half_pad, half_pad:-half_pad])
+
+
 def crop_mrc(fullpath, window=None, extension='_cropped'):
     '''
     Small utility to crop MRC files
@@ -840,16 +873,13 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     # make dir
     dir_name = os.path.join(local_drive, 'split_recon_' + sha)
     os.mkdir(dir_name)
-    split_data = split_img(old_data, tile_size)
+    split_data = split_img_with_padding(old_data, tile_size, padding)
     # save split data
     for i, data in enumerate(split_data):
-        nz, ny, nx = data.shape
         # save subimages in sub folder, use sha as ID
         savepath = os.path.join(dir_name,
                                 'sub_image{:03d}_{}.mrc'.format(i, sha))
-        Mrc.save(fft_pad(data, (nz, ny+padding, nx+padding), 'reflect'),
-                 savepath, hdr=oldmrc.hdr,
-                 ifExists='overwrite')
+        Mrc.save(data, savepath, hdr=oldmrc.hdr, ifExists='overwrite')
     # process data
     sirecon_ouput = []
     for path in glob.iglob(dir_name+'/sub_image*_{}.mrc'.format(sha)):
@@ -864,10 +894,8 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
                                  for path in sorted(glob.iglob(dir_name +
                                                     '/sub_image*_{}_proc.mrc'.format(sha)))
                                  ])
-    # recombine data, but trim padding first
-    recon_split_data_combine = combine_img(recon_split_data[:,
-                                                            padding:-padding,
-                                                            padding:-padding])
+    # recombine data, remember the data density is doubled so padding is too
+    recon_split_data_combine = combine_img_with_padding(recon_split_data, padding*2)
     # save data
     temp_mrc = Mrc.Mrc(savepath.replace('.mrc', '_proc.mrc'))
     total_save_path = fullpath.replace('.mrc',
