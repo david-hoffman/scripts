@@ -793,6 +793,7 @@ def split_img_with_padding(img, side, pad_width, mode='reflect'):
     '''
     Split SIM stack into sub-stacks with padding of pad_width
     '''
+    # if no padding revert to simpler function.
     if pad_width == 0:
         return split_img(img, side)
     # pull the shape of the image
@@ -878,7 +879,7 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     for i, data in enumerate(split_data):
         # save subimages in sub folder, use sha as ID
         savepath = os.path.join(dir_name,
-                                'sub_image{:03d}_{}.mrc'.format(i, sha))
+                                'sub_image{:06d}_{}.mrc'.format(i, sha))
         Mrc.save(data, savepath, hdr=oldmrc.hdr, ifExists='overwrite')
     # process data
     sirecon_ouput = []
