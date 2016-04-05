@@ -22,7 +22,7 @@ import os
 import Mrc
 from dphplotting import display_grid
 from scipy.ndimage import gaussian_filter
-from scipy.fftpack import ifftshift, fftshift, fftn
+from pyfftw.interfaces.scipy_fftpack import ifftshift, fftshift, fftn
 from matplotlib.colors import LogNorm
 
 # check to see if we're being run from the command line
