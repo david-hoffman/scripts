@@ -21,31 +21,12 @@ import numpy as np
 import os
 import Mrc
 from dphplotting import display_grid
+from dphutils import scale
 from scipy.ndimage import gaussian_filter
 from pyfftw.interfaces.scipy_fftpack import ifftshift, fftshift, fftn
 from matplotlib.colors import LogNorm
 
-# check to see if we're being run from the command line
-if __name__ == '__main__':
-
-    # if we want to update this to take more arguments we'll need to use one of
-    # the argument parsing packages
-    # grab the arguments from the command line
-    arg = docopt(__doc__)
-
-    # a little output so that the user knows whats going on
-    print('Running simcheck on', arg['<myfile>'])
-
-    # Need to take the first system argument as the filename for a TIF file
-
-    # test if filename has mrc in it
-    filename = arg['<myfile>']
-
-    name = os.path.basename(os.path.split(os.path.abspath(filename))[0])
-
-    data = Mrc.Mrc(filename).data
-
-    nphases = int(arg['<numphases>'])
+def simcheck(data, nphases):
     norients = data.shape[0]//nphases       # need to use integer divide
 
     # check user input before proceeding
@@ -69,6 +50,32 @@ if __name__ == '__main__':
     # Take the difference of the average power and the power of the average
     ft_data_diff = ft_data_avg_abs-abs(ft_data_avg)
 
+    return ft_data_diff, ft_data_avg_abs, ft_data_avg
+
+# check to see if we're being run from the command line
+if __name__ == '__main__':
+
+    # if we want to update this to take more arguments we'll need to use one of
+    # the argument parsing packages
+    # grab the arguments from the command line
+    arg = docopt(__doc__)
+
+    # a little output so that the user knows whats going on
+    print('Running simcheck on', arg['<myfile>'])
+
+    # Need to take the first system argument as the filename for a TIF file
+
+    # test if filename has mrc in it
+    filename = arg['<myfile>']
+
+    name = os.path.basename(os.path.split(os.path.abspath(filename))[0])
+
+    data = Mrc.Mrc(filename).data
+
+    nphases = int(arg['<numphases>'])
+
+    ft_data_diff, ft_data_avg_abs, ft_data_avg = simcheck(data, nphases)
+    norients = data.shape[0]//nphases
     orients = ['Orientation {}'.format(i) for i in range(norients)]
     # Plot everything and save
     fig1, ax1 = display_grid({k: v/v.max()
@@ -92,11 +99,6 @@ if __name__ == '__main__':
     #               cmap ='bwr')
     #  filename4 = name + ' Difference of Averages - Median Filter'
     #  fig4.suptitle(filename4, fontsize=16)
-
-    def scale(v):
-        mymin = v.min()
-        mymax = v.max()
-        return (v-mymin)/(mymax - mymin)
 
     filtered_ft_data_diff = gaussian_filter(ft_data_diff, (0, 6, 6))
     fig5, ax5 = display_grid({k: scale(v)
