@@ -3,7 +3,9 @@
 
 import os
 import glob
+import textwrap
 import numpy as np
+import matplotlib as mpl
 import multiprocessing as mp
 from docopt import docopt
 from skimage.external import tifffile as tif
@@ -46,7 +48,7 @@ def load_data(dirname, key):
             if '.tif' in fname}
 
 
-def clean_dirname(dirname):
+def clean_dirname(dirname, figsize):
     '''
     We only want the last two entries of dirname
 
@@ -55,12 +57,16 @@ def clean_dirname(dirname):
     and we want to clean those as well
     '''
     path = dirname.split(os.path.sep)
-    foldername = path[-2]
-    filename = path[-1]
+    fontsize = mpl.rcParams['font.size']
+    # 1/120 = inches/(fontsize*character)
+    num_chars = int(figsize/fontsize * 100)
+    foldername = textwrap.fill(path[-2], num_chars)
+    filename = textwrap.fill(path[-1], num_chars)
     return foldername + '\n' + filename
 
 
-def gen_thumbs(dirname, key='/*/*decon.tif', where='host', level=2, **kwargs):
+def gen_thumbs(dirname, key='/*/*decon.tif', where='host', level=2, figsize=6,
+               **kwargs):
     '''
     Main function to generate and save thumbnail pngs
     '''
@@ -68,8 +74,8 @@ def gen_thumbs(dirname, key='/*/*decon.tif', where='host', level=2, **kwargs):
     data = load_data(dirname, key)
     if data:
         # can clean the dirnames here
-        data = {clean_dirname(k): v for k, v in data.items()}
-        fig, ax = display_grid(data, **kwargs)
+        data = {clean_dirname(k, figsize): v for k, v in data.items()}
+        fig, ax = display_grid(data, figsize=figsize, **kwargs)
         foldername = os.path.abspath(dirname).split(os.path.sep)[-level]
         # save the figure.
         # fig.savefig(os.path.join(dirname, 'Thumbs ' + foldername + '.png'),
@@ -82,9 +88,12 @@ def gen_thumbs(dirname, key='/*/*decon.tif', where='host', level=2, **kwargs):
         else:
             save_name = os.path.abspath(
                 os.path.join(where, 'Thumbs ' + foldername + '.png'))
+        # make the layout 'tight'
+        fig.tight_layout()
         # save the figure
-        print('Saving', save_name)
+        print('Saving', save_name, '...')
         fig.savefig(save_name, bbox_inches='tight')
+        print('finished saving', save_name)
     # mark data for gc
     del data
     return dirname + os.path.sep + key
