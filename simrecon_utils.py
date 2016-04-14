@@ -858,7 +858,7 @@ def crop_mrc(fullpath, window=None, extension='_cropped'):
 
 
 def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
-                            extension='_split'):
+                            extension='_split', bg_estimate=None):
     '''
     Method that splits then processes and then recombines images
     '''
@@ -875,12 +875,22 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     dir_name = os.path.join(local_drive, 'split_recon_' + sha)
     os.mkdir(dir_name)
     split_data = split_img_with_padding(old_data, tile_size, padding)
+    if bg_estimate:
+        bgs = {}
     # save split data
     for i, data in enumerate(split_data):
         # save subimages in sub folder, use sha as ID
         savepath = os.path.join(dir_name,
                                 'sub_image{:06d}_{}.mrc'.format(i, sha))
         Mrc.save(data, savepath, hdr=oldmrc.hdr, ifExists='overwrite')
+        if bg_estimate == 'min':
+            bgs[i] = data.min()
+        elif bg_estimate == 'mean':
+            bgs[i] = data.mean()
+        elif bg_estimate == 'mode':
+            bgs[i] = np.argmax(np.bincount(data.ravel()))
+    # set up re
+    i_re = re.compile('(?<=sub_image)\d+')
     # process data
     sirecon_ouput = []
     for path in glob.iglob(dir_name+'/sub_image*_{}.mrc'.format(sha)):
@@ -889,16 +899,19 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
             'input_file': path,
             'output_file': path.replace('.mrc', '_proc.mrc')
             })
+        if bg_estimate:
+            i = int(re.findall(i_re, path)[0])
+            sim_kwargs['background'] = float(bgs[i])
         sirecon_ouput += simrecon(**sim_kwargs)
     # read in processed data
     recon_split_data = np.array([Mrc.Mrc(path).data[0]
-                                 for path in sorted(glob.iglob(dir_name +
+                                 for path in sorted(glob.glob(dir_name +
                                                     '/sub_image*_{}_proc.mrc'.format(sha)))
                                  ])
     # recombine data, remember the data density is doubled so padding is too
     recon_split_data_combine = combine_img_with_padding(recon_split_data, padding*2)
     # save data
-    temp_mrc = Mrc.Mrc(savepath.replace('.mrc', '_proc.mrc'))
+    temp_mrc = Mrc.Mrc(path.replace('.mrc', '_proc.mrc'))
     total_save_path = fullpath.replace('.mrc',
                                        '_proc{}{}.mrc'.format(tile_size, extension))
     Mrc.save(np.flipud(recon_split_data_combine),
