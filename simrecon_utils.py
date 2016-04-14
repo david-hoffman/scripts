@@ -946,10 +946,13 @@ def process_txt_output(txt_buffer):
     for data in (my_angles, my_mags, my_amps, my_phases):
         data.shape = (ny, nx, ndirs)
     # plot
+    return my_angles, my_mags, my_amps, my_phases
+
+def plot_params(angles, mags, amps, phases):
     titles = ('Angles', 'Magnitudes', 'Amplitudes', 'Phase')
     fig, axs = plt.subplots(4, 3, figsize=(3*4, 4*4))
-    for row, data, t in zip(axs, (my_angles, my_mags, my_amps, my_phases),
-                            titles):
+    for row, data, t, c in zip(axs, (angles, mags, amps, phases),
+                            titles, ('gnuplot2','gnuplot2','gnuplot2','seismic')):
         for i, ax in enumerate(row):
             # if angles we don't want absolute values.
             if 'Angles' in t:
@@ -960,7 +963,7 @@ def process_txt_output(txt_buffer):
             # set the title for the middle row
             if i == 1:
                 ax.set_title(t)
-            ax.matshow(data[..., i], vmin=vmin, vmax=vmax, cmap='seismic')
+            ax.matshow(np.flipud(data[..., i]), vmin=vmin, vmax=vmax, cmap=c)
             ax.axis('off')
     fig.tight_layout()
     return fig, axs
