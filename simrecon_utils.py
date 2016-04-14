@@ -885,8 +885,8 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
         Mrc.save(data, savepath, hdr=oldmrc.hdr, ifExists='overwrite')
         if bg_estimate == 'min':
             bgs[i] = data.min()
-        elif bg_estimate == 'mean':
-            bgs[i] = data.mean()
+        elif bg_estimate == 'median':
+            bgs[i] = np.median(data)
         elif bg_estimate == 'mode':
             bgs[i] = np.argmax(np.bincount(data.ravel()))
     # set up re
