@@ -916,11 +916,12 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     return total_save_path, sirecon_ouput
 
 
-def process_txt_output(txt_buffer, ndirs):
+def process_txt_output(txt_buffer):
     '''
     Take out put from above and parse into angles
     '''
     # compile the regexes
+    ndir_re = re.compile('(?<=ndirs=)\d+', flags=re.M)
     angle_re = re.compile('(?:amplitude:\n In.*)(?<=angle=)(-?\d+\.\d+)',
                           flags=re.M)
     mag_re = re.compile('(?:amplitude:\n In.*)(?<=mag=)(-?\d+\.\d+)',
@@ -930,6 +931,9 @@ def process_txt_output(txt_buffer, ndirs):
     phase_re = re.compile('(?:amplitude:\n In.*)(?<=phase=)(-?\d+\.\d+)',
                           flags=re.M)
     # parse output
+    my_dirs = set(re.findall(ndir_re, txt_buffer))
+    assert len(my_dirs) == 1
+    ndirs = int(list(my_dirs)[0])
     my_angles = np.array(re.findall(angle_re, txt_buffer)).astype(float)
     my_mags = np.array(re.findall(mag_re, txt_buffer)).astype(float)
     my_amps = np.array(re.findall(amp_re, txt_buffer)).astype(float)
@@ -937,7 +941,7 @@ def process_txt_output(txt_buffer, ndirs):
     # find sizes
     assert len(my_angles) == len(my_mags) == len(my_amps) == len(my_phases)
     nx = ny = int(np.sqrt(len(my_angles)//ndirs))
-    assert len(my_angles) * ndirs == nx * ny
+    assert len(my_angles) == nx * ny * ndirs, '{} == {} * {} * {}'.format(len(my_angles), ndirs, nx, ny)
     # reshape all
     for data in (my_angles, my_mags, my_amps, my_phases):
         data.shape = (ny, nx, ndirs)
