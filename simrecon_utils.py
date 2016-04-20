@@ -21,6 +21,7 @@ from peaks.peakfinder import PeakFinder
 from dphutils import (slice_maker, Pupil, scale_uint16, fft_pad,
                       nextpow2, radial_profile)
 from pyfftw.interfaces.numpy_fft import ifftshift, fftshift, fftn, ifftn
+from skimage.external import tifffile as tif
 
 
 class FakePSF(object):
@@ -1125,3 +1126,99 @@ def plot_params(angles, mags, amps, phases):
             ax.axis('off')
     fig.tight_layout()
     return fig, axs
+
+
+def stitch_img(infile, labelfile, outfile, num_threads=1):
+    '''
+    Run the stitching algorithm
+
+    More info can be found [here](https://github.com/mkazhdan/DMG)
+
+    Parameters
+    ----------
+    infile : path
+        Absolute path to the input file
+    labelfile : path
+        Absolute path to the label image
+    outfile : path
+        Absolute path to the output file
+    num_threads : int (default, 1)
+        The number of threads to run the problem across
+
+    Returns
+    -------
+    client_return_code : string
+        Output from client
+    server_return_code : string
+        Output from server
+    '''
+    # choose a communication port not in use
+    COM_PORT = "12345"
+    # set up client execution
+    client_exc_str = [
+        r"C:\DMG\ClientSocket.exe",     # binary location
+        "--address", "127.0.0.1",       # address for client, points HOME
+        "--port", COM_PORT,             # port to communicate over
+        "--labels", labelfile,          # where's the label file, path
+        "--pixels", infile,             # where's the input file, path
+        "--threads", str(num_threads),  # How many threads to use for computation
+        "--inCore",                     # tell algo to perform all computations in memory, __DO NOT__ stream to disk
+        "--out", outfile,               # where do you want output
+        "--hdr"                         # tell algorithm to use full 16 bit depth
+    ]
+    # set up server execution
+    server_exc_str = [
+        r"C:\DMG\ServerSocket.exe", # binary location
+        "--count", "1",             # how many connections to expect
+        "--port", COM_PORT,         # port to communicate over
+        "--verbose",                # tell me what I'm doing
+        "--tileExt", "tif",         # what file am I working with
+        "--gray"                    # gray scale images, not color
+    ]
+    # both programs need to run concurrently so
+    with subprocess.Popen(server_exc_str, stdout=subprocess.PIPE) as server:
+        return_code = subprocess.check_output(client_exc_str)
+        client_return_code = return_code.decode()
+        server_return_code = server.stdout.read().decode()
+
+    return client_return_code, server_return_code
+
+
+def stitch_tiled_sim_img(sim_img_path, tile_size=None):
+    '''
+    A utility function to run the DMG stitching program on SIM data.
+    '''
+    # determin tile_size from file name if not given
+    if tile_size is None:
+        # make a regex
+        tile_re = re.compile('(?<=proc)\d+')
+        # apply it, there should only be one occurance
+        re_result = re.findall(tile_re, sim_img_path)
+        assert len(re_result) == 1, "More than one Regex found."
+        tile_size = int(re_result[0])
+    # prep the image to stitch
+    to_stitch_path = sim_img_path.replace('.mrc', '.tif')
+    # open the Mrc
+    junk_mrc = Mrc.Mrc(sim_img_path)
+    # pull data
+    data = junk_mrc.data[0]
+    # save tif version while filling up the bit depth
+    tif.imsave(to_stitch_path, scale_uint16(data))
+    # kill Mrc
+    del junk_mrc
+    labels = make_label_img(data.shape[-1], tile_size)
+    head, tail = os.path.split(sim_img_path)
+    tif.imsave(head + 'labels.tif', labels)
+    labelfile = head + 'labels.tif'
+    assert os.path.exists(labelfile), labelfile + " doesn't exist!"
+    # prep outfile
+    outfile = to_stitch_path.replace('.tif', '_stitch.tif')
+    # stitch
+    return_codes = stitch_img(to_stitch_path, labelfile, outfile)
+    return return_codes
+
+
+def make_label_img(img_size, tile_size):
+    # double tile size because SIM
+    return np.array([np.ones((tile_size*2, tile_size*2), np.uint16)*i
+                     for i in range((img_size//tile_size)**2)])
