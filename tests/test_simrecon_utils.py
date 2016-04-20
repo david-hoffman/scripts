@@ -4,6 +4,8 @@ from nose.tools import *
 import numpy as np
 import simrecon_utils as su
 from Mrc import Mrc
+from skimage.data import astronaut
+from skimage.color import rgb2gray
 
 
 def test_split_img_args():
@@ -46,3 +48,36 @@ def test_img_split_combine2():
     combine_data = su.combine_img(split_data)
     # compare to straight mean.
     assert np.all(data.mean(0) == combine_data)
+
+
+class TestBlendCombine(unittest.TestCase):
+    '''
+    Testing the blending functions
+    '''
+
+    def setUp(self):
+        self.data = rgb2gray(astronaut())
+
+        # parameters for test
+        self.pad_size = 32
+        self.tile_size = 64
+        # split the data and discard extra dimension, not needed here.
+        self.split_data = su.split_img_with_padding(
+                                self.data.reshape((1, 512, 512)),
+                                self.tile_size,
+                                self.pad_size)[:, 0]
+
+    def test_split(self):
+        '''
+        Testing the blended combine
+        '''
+        pad_size = self.pad_size
+        split_data = self.split_data
+
+        to_combine_data = np.array([
+            su.extend_and_window_tile(d, pad_size, i, split_data.shape[0])
+            for i, d in enumerate(split_data)])
+        my_slice = slice(pad_size//2, -pad_size//2, None)
+        recombine_data = to_combine_data.sum(0)[my_slice, my_slice]
+        assert np.allclose(self.data, recombine_data, 1e-8,
+                        np.finfo(self.data.dtype).resolution)

@@ -751,6 +751,42 @@ def calc_radial_OTF(psf, krcutoff=None, show_OTF=False):
     return radprof
 
 
+def crop_mrc(fullpath, window=None, extension='_cropped'):
+    '''
+    Small utility to crop MRC files
+
+    Parameters
+    ----------
+    fullpath : path
+        path to file
+    window : slice (optional)
+        crop window
+
+    Returns
+    -------
+    croppath : path
+        path to cropped file
+    '''
+    # open normal MRC file
+    oldmrc = Mrc.Mrc(fullpath)
+    old_data = oldmrc.data
+    # make the crop path
+    croppath = fullpath.replace('.mrc', extension + '.mrc')
+    # crop window
+    if window is None:
+        nz, ny, nx = old_data.shape
+        window = [slice(None, None, None)] + slice_maker(ny//2, nx//2,
+                                                         max(ny, nx)//2)
+    # prepare a new file to write to
+    Mrc.save(old_data[window], croppath, ifExists='overwrite', hdr=oldmrc.hdr)
+    # close the old MRC file.
+    oldmrc.close()
+    del oldmrc
+    return croppath
+
+# split, process, recombine functions
+
+
 def split_img(img, side):
     '''
     A utility to split a SIM stack into substacks
@@ -785,8 +821,8 @@ def combine_img(img_stack):
     assert np.sqrt(num_sub_imgs) == divisor
 
     return np.rollaxis(
-                        img_stack.reshape(divisor, divisor, ylen, xlen), 0, 3
-                       ).reshape(ylen*divisor, xlen*divisor)
+                       img_stack.reshape(divisor, divisor, ylen, xlen), 0, 3
+                      ).reshape(ylen*divisor, xlen*divisor)
 
 
 def split_img_with_padding(img, side, pad_width, mode='reflect'):
@@ -813,6 +849,136 @@ def split_img_with_padding(img, side, pad_width, mode='reflect'):
     # return this
     return split_pad_img
 
+def cosine_edge(pad_size):
+    '''
+    Generates a cosine squared edge
+    
+    When added to its reverse it equals 1
+    
+    Parameters
+    ----------
+    pad_size : int
+        The size of the edge (i.e. the amount of image padding)
+
+    Returns
+    -------
+    edge : ndarray (1D)
+        The array representing the edge
+        
+    Example
+    -------
+    >>> edge = cosine_edge(10)
+    >>> rev_edge = edge[::-1]
+    >>> np.allclose(edge + rev_edge, np.ones_like(edge))
+    True
+    '''
+    x = np.arange(pad_size)
+    return np.sin(np.pi*x/(pad_size-1)/2)**2
+
+
+def linear_edge(pad):
+    '''
+    Generates a linear edge
+    
+    When added to its reverse it equals 1
+    
+    Parameters
+    ----------
+    pad_size : int
+        The size of the edge (i.e. the amount of image padding)
+        
+    Returns
+    -------
+    edge : ndarray (1D)
+        The array representing the edge
+        
+    Example
+    -------
+    >>> edge = linear_edge(10)
+    >>> rev_edge = edge[::-1]
+    >>> np.allclose(edge + rev_edge, np.ones_like(edge))
+    True
+    '''
+    return np.arange(pad)/(pad-1)
+
+
+def edge_window(center_size, edge_size, window_func=cosine_edge):
+    '''
+    Generate a 1D window that ramps up through the padded region and is flat in the middle
+    
+    Parameters
+    ----------
+    center_size : int
+        The size of the center part
+    edge_size : int
+        The size of the edge parts
+        
+    Returns
+    -------
+    edge_window : ndarray (1D)
+        a window with a rising and falling edge
+    '''
+    center_part = np.ones(center_size)
+    left_part = window_func(edge_size)
+    right_part = left_part[::-1]
+    return np.concatenate((left_part, center_part, right_part))
+
+
+def extend_and_window_tile(tile, pad_size, tile_num, num_tiles,
+                           window_func=cosine_edge):
+    '''
+    Function that takes a tile that has been padded and its tile number and places it in the correct
+    space of the overall image and windows the function before padding with zeros
+    
+    Parameters
+    ----------
+    tile : ndarray (img)
+        the tile to pad and window
+    pad_size : int
+        the amount of padding in the tile
+    tile_num : int
+        Assumes data is from a `split_img` operation, this is the index
+    num_tiles : int
+        total number of tiles
+    window_func : cosine_edge (default, callable)
+        the window function to use
+        
+    Returns
+    -------
+    tile : ndarray
+        A tile that has been windowed and then extended to the appropriate size
+    '''
+    # calculate the total number of tiles in the x and y directions
+    # (assumes square image)
+    ytot = xtot = int(np.sqrt(num_tiles))
+    assert ytot * xtot == num_tiles, "Image is not square!"
+    # calculate the position of this tile
+    yn, xn = tile_num % ytot, tile_num // ytot
+    # calculate the unpadded size of the tile (original tile size)
+    to_pad = (tile.shape[-1] - pad_size)
+    # calculate the before and after padding for each direction
+    ybefore = yn*to_pad
+    yafter = (ytot-yn-1)*to_pad
+    xbefore = xn*to_pad
+    xafter = (xtot-xn-1)*to_pad
+    # make y window and x window
+    ywin = edge_window(to_pad-pad_size, pad_size, window_func=window_func)
+    xwin = edge_window(to_pad-pad_size, pad_size, window_func=window_func)
+    # if the tile is on an edge, don't window the edge side(s)
+    if yn == 0:
+        ywin[:pad_size*2] = 1
+    elif yn == ytot-1:
+        ywin[-pad_size*2:] = 1
+    if xn == 0:
+        xwin[:pad_size*2] = 1
+    elif xn == xtot-1:
+        xwin[-pad_size*2:] = 1
+    # generate the 2D window
+    win_2d = ywin.reshape(-1, 1).dot(xwin.reshape(1, -1))
+    # return the windowed padded tile
+    return np.pad(tile*win_2d, ((ybefore, yafter), (xbefore, xafter)),
+                  mode='constant', constant_values=0)
+
 
 def combine_img_with_padding(img_stack, pad_width):
     '''
@@ -823,42 +989,9 @@ def combine_img_with_padding(img_stack, pad_width):
     return combine_img(img_stack[..., half_pad:-half_pad, half_pad:-half_pad])
 
 
-def crop_mrc(fullpath, window=None, extension='_cropped'):
-    '''
-    Small utility to crop MRC files
-
-    Parameters
-    ----------
-    fullpath : path
-        path to file
-    window : slice (optional)
-        crop window
-
-    Returns
-    -------
-    croppath : path
-        path to cropped file
-    '''
-    # open normal MRC file
-    oldmrc = Mrc.Mrc(fullpath)
-    old_data = oldmrc.data
-    # make the crop path
-    croppath = fullpath.replace('.mrc', extension + '.mrc')
-    # crop window
-    if window is None:
-        nz, ny, nx = old_data.shape
-        window = [slice(None, None, None)] + slice_maker(ny//2, nx//2,
-                                                         max(ny, nx)//2)
-    # prepare a new file to write to
-    Mrc.save(old_data[window], croppath, ifExists='overwrite', hdr=oldmrc.hdr)
-    # close the old MRC file.
-    oldmrc.close()
-    del oldmrc
-    return croppath
-
-
 def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
-                            extension='_split', bg_estimate=None):
+                            extension='_split', bg_estimate=None,
+                            window_func=None):
     '''
     Method that splits then processes and then recombines images
     '''
@@ -906,14 +1039,26 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     # read in processed data
     recon_split_data = np.array([Mrc.Mrc(path).data[0]
                                  for path in sorted(glob.glob(dir_name +
-                                                    '/sub_image*_{}_proc.mrc'.format(sha)))
-                                 ])
-    # recombine data, remember the data density is doubled so padding is too
-    recon_split_data_combine = combine_img_with_padding(recon_split_data, padding*2)
+                                        '/sub_image*_{}_proc.mrc'.format(sha)))
+                                ])
+    # recombine data, remember the data density is doubled so padding is to
+    if window_func is None:
+        recon_split_data_combine = combine_img_with_padding(recon_split_data,
+                                                            padding*2)
+    else:
+        num_tiles = recon_split_data.shape[0]
+        to_combine_data = np.array([extend_and_window_tile(d, padding*2, i,
+                                                           num_tiles,
+                                                           window_func=window_func)
+                                    for i, d in enumerate(recon_split_data)])
+        # still need to cut off the edges
+        my_slice = slice(padding, -padding, None)
+        # cut them here.
+        recon_split_data_combine = to_combine_data.sum(0)[my_slice, my_slice].astype(np.float32)
     # save data
     temp_mrc = Mrc.Mrc(path.replace('.mrc', '_proc.mrc'))
     total_save_path = fullpath.replace('.mrc',
-                                       '_proc{}{}.mrc'.format(tile_size, extension))
+                                '_proc{}{}.mrc'.format(tile_size, extension))
     Mrc.save(np.flipud(recon_split_data_combine),
              total_save_path,
              hdr=temp_mrc.hdr,
