@@ -1204,21 +1204,22 @@ def stitch_tiled_sim_img(sim_img_path, tile_size=None):
     data = junk_mrc.data[0]
     # save tif version while filling up the bit depth
     tif.imsave(to_stitch_path, scale_uint16(data))
+    labels = make_label_img(data.shape[-1]//2, tile_size)
     # kill Mrc
     del junk_mrc
-    labels = make_label_img(data.shape[-1], tile_size)
     head, tail = os.path.split(sim_img_path)
-    tif.imsave(head + 'labels.tif', labels)
-    labelfile = head + 'labels.tif'
-    assert os.path.exists(labelfile), labelfile + " doesn't exist!"
+    label_file = head + os.path.sep + 'labels.tif'
+    tif.imsave(label_file, labels)
+    assert os.path.exists(label_file), label_file + " doesn't exist!"
     # prep outfile
     outfile = to_stitch_path.replace('.tif', '_stitch.tif')
     # stitch
-    return_codes = stitch_img(to_stitch_path, labelfile, outfile)
+    return_codes = stitch_img(to_stitch_path, label_file, outfile)
     return return_codes
 
 
 def make_label_img(img_size, tile_size):
     # double tile size because SIM
-    return np.array([np.ones((tile_size*2, tile_size*2), np.uint16)*i
-                     for i in range((img_size//tile_size)**2)])
+    labels = np.array([np.ones((tile_size*2, tile_size*2), np.uint16)*i
+                       for i in range((img_size//tile_size)**2)])
+    return combine_img(labels)
