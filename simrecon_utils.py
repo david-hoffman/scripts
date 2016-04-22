@@ -992,7 +992,7 @@ def combine_img_with_padding(img_stack, pad_width):
 
 def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
                             extension='_split', bg_estimate=None,
-                            window_func=None):
+                            window_func=cosine_edge):
     '''
     Method that splits then processes and then recombines images
     '''
