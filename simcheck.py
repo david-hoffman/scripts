@@ -23,8 +23,14 @@ import Mrc
 from dphplotting import display_grid
 from dphutils import scale
 from scipy.ndimage import gaussian_filter
-from pyfftw.interfaces.scipy_fftpack import ifftshift, fftshift, fftn
+try:
+    from pyfftw.interfaces.scipy_fftpack import ifftshift, fftshift, fftn
+    import pyfftw
+    pyfftw.interfaces.cache.enable()
+except ImportError:
+    from scipy.fftpack import ifftshift, fftshift, fftn
 from matplotlib.colors import LogNorm
+
 
 def simcheck(data, nphases):
     norients = data.shape[0]//nphases       # need to use integer divide

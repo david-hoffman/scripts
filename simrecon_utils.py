@@ -20,7 +20,13 @@ from peaks.peakfinder import PeakFinder
 
 from dphutils import (slice_maker, Pupil, scale_uint16, fft_pad,
                       nextpow2, radial_profile)
-from pyfftw.interfaces.numpy_fft import ifftshift, fftshift, fftn, ifftn
+try:
+    from pyfftw.interfaces.numpy_fft import ifftshift, fftshift, fftn, ifftn
+    import pyfftw
+    # Turn on the cache for optimum performance
+    pyfftw.interfaces.cache.enable()
+except ImportError:
+    from numpy.fft import ifftshift, fftshift, fftn, ifftn
 from skimage.external import tifffile as tif
 
 
