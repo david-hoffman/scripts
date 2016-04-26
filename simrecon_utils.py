@@ -489,6 +489,8 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
         do not want to apodize the output data
     gammaApo: float
         apodize the output data with a power function
+    preciseapo: bool
+        Apply precise apo or not
     zoomfact: float
         factor by which to subdivide pixels laterally
     zzoom: float
@@ -583,6 +585,7 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
         'fitonephase',
         'noapodizeout',
         'gammaApo',
+        'preciseapo',
         'zoomfact',
         'zzoom',
         'zpadto',
@@ -633,6 +636,7 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
         'fitonephase': bool,
         'noapodizeout': bool,
         'gammaApo': float,
+        'preciseapo': bool,
         'zoomfact': float,
         'zzoom': float,
         'zpadto': int,
