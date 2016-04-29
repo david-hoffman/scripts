@@ -171,7 +171,7 @@ class PSFFinder(object):
         # fit blobs in max intensity
         blobs_df = my_PF.fit_blobs(window_width)
         # round to make sorting a little more meaningfull
-        blobs_df.SNR = np.round(blobs_df.dropna().SNR).astype(int)
+        blobs_df.SNR = blobs_df.dropna().SNR.round().astype(int)
         # sort by SNR then sigma_x.
         new_blobs_df = blobs_df[
                         blobs_df.sigma_x < max_s
@@ -619,7 +619,7 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
         'savealignedraw',
         'saveoverlaps'
     ))
-
+    numeric = (int, float)
     valid_kwargs.update({
         'ndirs': int,
         'nphases': int,
@@ -637,13 +637,13 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
         'noapodizeout': bool,
         'gammaApo': float,
         'preciseapo': bool,
-        'zoomfact': float,
+        'zoomfact': numeric,
         'zzoom': float,
         'zpadto': int,
         'explodefact': float,
         'nofilteroverlaps': bool,
         'nosuppress': bool,
-        'suppressR': float,
+        'suppressR': numeric,
         'dampenOrder0': bool,
         'noOrder0': bool,
         'noequalize': bool,
@@ -651,7 +651,7 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
         'equalizet': bool,
         'wiener': float,
         'wienerInr': float,
-        'background': float,
+        'background': numeric,
         'bgInExtHdr': bool,
         'otfRA': bool,
         'driftfix': bool,
@@ -844,12 +844,16 @@ def split_img_with_padding(img, side, pad_width, mode='reflect'):
     if pad_width == 0:
         return split_img(img, side)
     # pull the shape of the image
+    # NOTE: need to refactor this so that it works well with nt, np, ny, nx waves
+    # nall = img.shape[:-2]
+    # ny, nx = img.shape[-2], img.shape[-1]
     nz, ny, nx = img.shape
     # make sure the sides are equal
     assert nx == ny
     # make sure that side cleanly divides img dimensions
     assert nx % side == 0
     # pad the whole image
+    # pad_img = fft_pad(img, nall + (pad_width + ny, pad_width + nx), mode)
     pad_img = fft_pad(img, (nz, pad_width + ny, pad_width + nx), mode)
     # split the image into padded sub-images
     split_pad_img = np.array([pad_img[...,
@@ -1121,7 +1125,7 @@ def plot_params(angles, mags, amps, phases):
     titles = ('Angles', 'Magnitudes', 'Amplitudes', 'Phase')
     fig, axs = plt.subplots(4, 3, figsize=(3*4, 4*4))
     for row, data, t, c in zip(axs, (angles, mags, amps, phases),
-                            titles, ('gnuplot2','gnuplot2','gnuplot2','seismic')):
+                            titles, ('gnuplot2', 'gnuplot2', 'gnuplot2', 'seismic')):
         for i, ax in enumerate(row):
             # if angles we don't want absolute values.
             if 'Angles' in t:
