@@ -730,7 +730,7 @@ def calc_radial_OTF(psf, krcutoff=None, show_OTF=False):
     except TypeError:
         offset = np.median(psf)
     # remove background from PSF
-    newpsf = psf.astype(float)-offset
+    newpsf = psf.astype(float) - offset
     # recenter
     # TODO: add this part
 
@@ -748,10 +748,9 @@ def calc_radial_OTF(psf, krcutoff=None, show_OTF=False):
         # if we have a 3D OTF collapse it by summation along kz into a 2D OTF.
         otf = otf.mean(0)
 
-    center = np.array(otf.shape)/2
+    center = np.array(otf.shape) / 2
 
-    radprof = (radial_profile(np.real(otf), center) +
-               radial_profile(np.imag(otf), center)*1j)[:int(center[0]+1)]
+    radprof, _ = radial_profile(otf)[:int(center[0] + 1)]
 
     radprof /= radprof.max()
 
