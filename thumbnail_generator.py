@@ -59,7 +59,7 @@ def clean_dirname(dirname, figsize):
     path = dirname.split(os.path.sep)
     fontsize = mpl.rcParams['font.size']
     # 1/120 = inches/(fontsize*character)
-    num_chars = int(figsize/fontsize * 100)
+    num_chars = int(figsize / fontsize * 100)
     foldername = textwrap.fill(path[-2], num_chars)
     filename = textwrap.fill(path[-1], num_chars)
     return foldername + '\n' + filename

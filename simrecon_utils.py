@@ -577,6 +577,7 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
         'fastSIM',
         'recalcarray',
         'inputapo',
+        'nordersout',
         'forcemodamp',
         'nok0search',
         'nokz0',
@@ -609,7 +610,6 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
         'fixphasestep',
         'noff',
         'usecorr',
-        'nordersout',
         'angle0',
         'negDangle',
         'ls',
@@ -848,9 +848,9 @@ def split_img_with_padding(img, side, pad_width, mode='reflect'):
     # ny, nx = img.shape[-2], img.shape[-1]
     nz, ny, nx = img.shape
     # make sure the sides are equal
-    assert nx == ny
+    assert nx == ny, "Sides are not equal, {} != {}".format(nx, ny)
     # make sure that side cleanly divides img dimensions
-    assert nx % side == 0
+    assert nx % side == 0, "Sides are not mutltiples of tile size, {} % {} != 0".format(nx, side)
     # pad the whole image
     # pad_img = fft_pad(img, nall + (pad_width + ny, pad_width + nx), mode)
     pad_img = fft_pad(img, (nz, pad_width + ny, pad_width + nx), mode)
@@ -1008,6 +1008,10 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
                             window_func=cosine_edge):
     '''
     Method that splits then processes and then recombines images
+
+    Returns
+    -------
+    total_save_path, sirecon_ouput
     '''
     # open old Mrc
     oldmrc = Mrc.Mrc(fullpath)
@@ -1016,14 +1020,16 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     # generate hex hash, will use as ID
     sha = hashlib.md5(old_data).hexdigest()
     sim_kwargs['sha'] = sha
-    # find local drive
-    local_drive = os.path.expanduser('~')
+    # split the data
+    split_data = split_img_with_padding(old_data, tile_size, padding)
+    # estimate background
+    if bg_estimate:
+        bgs = {}
     # make dir
     dir_name = os.path.join(local_drive, 'split_recon_' + sha)
     os.mkdir(dir_name)
-    split_data = split_img_with_padding(old_data, tile_size, padding)
-    if bg_estimate:
-        bgs = {}
+    # find local drive
+    local_drive = os.path.expanduser('~')
     # save split data
     for i, data in enumerate(split_data):
         # save subimages in sub folder, use sha as ID
