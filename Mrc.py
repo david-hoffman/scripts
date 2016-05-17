@@ -213,9 +213,9 @@ class Mrc:
             s0 =  n0 // nPixPerSec # //-int-division (rounds down)
 
             if n0 > N.prod(shape):
-                print("** WARNING **: found extra sections in file: %d sections; while shape from header: %s"%(s0, shape))
+                warnings.warn("found extra sections in file: %d sections; while shape from header: %s"%(s0, shape))
             else:
-                print("** WARNING **: file truncated to %d sections; while shape from header: %s"%(s0, shape))
+                warnings.warn("file truncated to %d sections; while shape from header: %s"%(s0, shape))
 
             shape = (s0,) + shape[1:]
             self.data = self.data[:N.prod(shape)]
