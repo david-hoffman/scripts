@@ -16,6 +16,7 @@ from dphplotting import display_grid
 # associated with value. This way values would be available for
 # gc once they've been used
 
+
 def find_paths(home='.', key='SIM'):
     '''
     Utility function to return path names of folders
@@ -66,7 +67,7 @@ def clean_dirname(dirname, figsize):
 
 
 def gen_thumbs(dirname, key='/*/*decon.tif', where='host', level=2, figsize=6,
-               **kwargs):
+               redo=True, **kwargs):
     '''
     Main function to generate and save thumbnail pngs
     '''
@@ -74,12 +75,7 @@ def gen_thumbs(dirname, key='/*/*decon.tif', where='host', level=2, figsize=6,
     data = load_data(dirname, key)
     if data:
         # can clean the dirnames here
-        data = {clean_dirname(k, figsize): v for k, v in data.items()}
-        fig, ax = display_grid(data, figsize=figsize, **kwargs)
         foldername = os.path.abspath(dirname).split(os.path.sep)[-level]
-        # save the figure.
-        # fig.savefig(os.path.join(dirname, 'Thumbs ' + foldername + '.png'),
-        #             bbox_inches='tight')
         if where == 'host':
             save_name = 'Thumbs ' + foldername + '.png'
         elif where == 'in folder':
@@ -88,6 +84,14 @@ def gen_thumbs(dirname, key='/*/*decon.tif', where='host', level=2, figsize=6,
         else:
             save_name = os.path.abspath(
                 os.path.join(where, 'Thumbs ' + foldername + '.png'))
+        if not redo and os.path.exists(save_name):
+            print(save_name, "already exists, skipping")
+            return dirname + os.path.sep + key
+        data = {clean_dirname(k, figsize): v for k, v in data.items()}
+        fig, ax = display_grid(data, figsize=figsize, **kwargs)
+        # save the figure.
+        # fig.savefig(os.path.join(dirname, 'Thumbs ' + foldername + '.png'),
+        #             bbox_inches='tight')
         # make the layout 'tight'
         fig.tight_layout()
         # save the figure
@@ -104,8 +108,8 @@ def gen_all_thumbs(home, path_key='SIM', **kwargs):
     '''
     with mp.Pool() as pool:
         results = [pool.apply_async(
-                    gen_thumbs, args=(path,), kwds=kwargs
-                ) for path in find_paths(home, path_key)]
+            gen_thumbs, args=(path,), kwds=kwargs
+        ) for path in find_paths(home, path_key)]
         for pp in results:
             pp.get()
     # for path in find_paths(home, path_key):
@@ -113,54 +117,4 @@ def gen_all_thumbs(home, path_key='SIM', **kwargs):
 
 
 if __name__ == '__main__':
-
-    # grab the argsuments from the command line
-    args = docopt(__doc__)
-
-    # a little output so that the user knows whats going on
-    print('Generating thumbnails', args['<myfile>'])
-
-    # Need to take the first system argsument as the filename for a TIF file
-
-    # test if filename has tiff in it
-    filename = args['<myfile>']
-
-    # try our main block
-    try:
-        if '.tif' in filename or '.tiff' in filename:
-            # here's the real danger zone, did the user give us a real file?
-            try:
-                data = tif.imread(filename)
-            except FileNotFoundError as er:
-                raise er
-            if args['--log']:
-                import numpy as np
-                if data.min() > 0:
-                    data = np.log(data)
-                else:
-                    print(filename, 'had negative numbers, log not taken')
-
-            # Trying to set the cmap here opens a new figure window
-            # need to set up kwargss for efficient argsument passing
-            # plt.set_cmap('gnuplot2')
-            # plot the data
-            fig, ax = mip(data)
-            # readjust the white space (maybe move this into main code later)
-            fig.subplots_adjust(top=0.85, hspace=0.3, wspace=0.3)
-            # add an overall figure title that's the file name
-            fig.suptitle(filename, fontsize=16)
-
-            # check to see if we should make a PDF
-            if args['--PDF']:
-                fig.savefig(filename.replace('.tiff', '.pdf').replace('.tif', '.pdf'))
-            else:
-                # I still don't know why fig.show() doesn't work
-                # I think it has something to do with pyplot's backend
-                plt.show()
-        else:
-            # this is our own baby error handling, it avoids loading the
-            # skimage package
-            print('You didn\'t give me a TIFF')
-
-    except Exception as er:
-        print(er)
+    # For cmd line utility someday.

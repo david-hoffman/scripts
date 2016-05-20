@@ -738,7 +738,7 @@ def calc_radial_OTF(psf, krcutoff=None, show_OTF=False):
     otf = ifftshift(fftn(fftshift(newpsf)))
 
     if show_OTF:
-        from dphplotting.mip import mip
+        from dphplotting import mip
         from matplotlib.colors import LogNorm
         # this is still wrong, need to do the mean before summing
         # really we need a slice function.
