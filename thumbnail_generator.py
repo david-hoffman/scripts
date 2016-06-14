@@ -7,7 +7,6 @@ import textwrap
 import numpy as np
 import matplotlib as mpl
 import multiprocessing as mp
-from docopt import docopt
 from skimage.external import tifffile as tif
 from dphplotting import display_grid
 
@@ -89,13 +88,10 @@ def gen_thumbs(dirname, key='/*/*decon.tif', where='host', level=2, figsize=6,
             return dirname + os.path.sep + key
         data = {clean_dirname(k, figsize): v for k, v in data.items()}
         fig, ax = display_grid(data, figsize=figsize, **kwargs)
-        # save the figure.
-        # fig.savefig(os.path.join(dirname, 'Thumbs ' + foldername + '.png'),
-        #             bbox_inches='tight')
         # make the layout 'tight'
         fig.tight_layout()
         # save the figure
-        print('Saving', save_name, '...')
+        print('Saving', save_name, 'on', os.getpid(), '...')
         fig.savefig(save_name, bbox_inches='tight')
         print('finished saving', save_name)
     # mark data for gc
@@ -107,14 +103,15 @@ def gen_all_thumbs(home, path_key='SIM', **kwargs):
     '''
     '''
     with mp.Pool() as pool:
+        # spread jobs over processors.
         results = [pool.apply_async(
             gen_thumbs, args=(path,), kwds=kwargs
         ) for path in find_paths(home, path_key)]
         for pp in results:
+            # workers take care of output so nothing needs to be saved
             pp.get()
-    # for path in find_paths(home, path_key):
-    #     gen_thumbs(path, **kwargs)
 
 
 if __name__ == '__main__':
+    raise NotImplementedError
     # For cmd line utility someday.
