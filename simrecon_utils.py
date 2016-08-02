@@ -1090,8 +1090,11 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
         slc = slice(edge_pix, -edge_pix, None)
         # cut them here.
         recon_split_data_combine = to_combine_data[slc, slc].astype(np.float32)
-        assert recon_split_data.shape[-1] == old_data.shape[-1] * zoom, "X-dim"
-        assert recon_split_data.shape[-2] == old_data.shape[-2] * zoom, "Y-dim"
+        # make sure the new data is the right shape
+        oldy, oldx = old_data.shape[-2:]
+        newy, newx = recon_split_data_combine.shape[-2:]
+        assert newx == oldx * zoom, "X-dim: {} != {}".format(newx, oldx * zoom)
+        assert newy == oldy * zoom, "Y-dim: {} != {}".format(newy, oldy * zoom)
     # save data
     temp_mrc = Mrc.Mrc(path.replace('.mrc', '_proc.mrc'))
     total_save_path = fullpath.replace(
