@@ -5,6 +5,7 @@ SIMRecon Utility Functions
 import os
 import glob
 import re
+import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 # need subprocess to run commands
@@ -1017,6 +1018,10 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     -------
     total_save_path, sirecon_ouput
     '''
+    # make sure zoomfact is integer
+    zoom = sim_kwargs["zoomfact"]
+    assert zoom.is_integer(), "Zoomfact is not an interger, Abort!"
+    zoom = int(zoom)
     # open old Mrc
     oldmrc = Mrc.Mrc(fullpath)
     # pull data
@@ -1026,6 +1031,7 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     sim_kwargs['sha'] = sha
     # split the data
     split_data = split_img_with_padding(old_data, tile_size, padding)
+    num_tiles = split_data.shape[0]
     # estimate background
     if bg_estimate:
         bgs = {}
@@ -1035,7 +1041,8 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     dir_name = os.path.join(local_drive, 'split_recon_' + sha)
     os.mkdir(dir_name)
     # save split data
-    for i, data in enumerate(split_data):
+    for i, data in tqdm.tqdm(
+        enumerate(split_data), "Splitting and saving data", num_tiles, False):
         # save subimages in sub folder, use sha as ID
         savepath = os.path.join(dir_name,
                                 'sub_image{:06d}_{}.mrc'.format(i, sha))
@@ -1050,7 +1057,7 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     i_re = re.compile('(?<=sub_image)\d+')
     # process data
     sirecon_ouput = []
-    for path in glob.iglob(dir_name + '/sub_image*_{}.mrc'.format(sha)):
+    for path in tqdm.tqdm(glob.iglob(dir_name + '/sub_image*_{}.mrc'.format(sha)), "Processing tiles", num_tiles, False):
         # update the kwargs to have the input file.
         sim_kwargs.update({
             'input_file': path,
@@ -1068,21 +1075,27 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     # recombine data, remember the data density is doubled so padding is to
     if window_func is None:
         recon_split_data_combine = combine_img_with_padding(recon_split_data,
-                                                            padding * 2)
+                                                            padding * zoom)
     else:
-        num_tiles = recon_split_data.shape[0]
-        to_combine_data = np.array([extend_and_window_tile(d, padding * 2, i,
-                                                           num_tiles,
-                                                           window_func=window_func)
-                                    for i, d in enumerate(recon_split_data)])
+        to_combine_data = None
+        for i, d in tqdm.tqdm(enumerate(recon_split_data), "Recombining", num_tiles, False):
+            current_tile = extend_and_window_tile(d, padding * zoom, i,
+                                                  num_tiles,
+                                                  window_func=window_func)
+            if to_combine_data is None:
+                to_combine_data = np.zeros_like(current_tile)
+            to_combine_data += current_tile
         # still need to cut off the edges
-        my_slice = slice(padding, -padding, None)
+        edge_pix = (padding // 2) * zoom
+        slc = slice(edge_pix, -edge_pix, None)
         # cut them here.
-        recon_split_data_combine = to_combine_data.sum(0)[my_slice, my_slice].astype(np.float32)
+        recon_split_data_combine = to_combine_data[slc, slc].astype(np.float32)
+        assert recon_split_data.shape[-1] == old_data.shape[-1] * zoom, "X-dim"
+        assert recon_split_data.shape[-2] == old_data.shape[-2] * zoom, "Y-dim"
     # save data
     temp_mrc = Mrc.Mrc(path.replace('.mrc', '_proc.mrc'))
-    total_save_path = fullpath.replace('.mrc',
-                                '_proc{}{}.mrc'.format(tile_size, extension))
+    total_save_path = fullpath.replace(
+        '.mrc', '_proc{}{}.mrc'.format(tile_size, extension))
     Mrc.save(np.flipud(recon_split_data_combine),
              total_save_path,
              hdr=temp_mrc.hdr,
@@ -1132,7 +1145,8 @@ def process_txt_output(txt_buffer):
 
 def plot_params(angles, mags, amps, phases):
     titles = ('Angles', 'Magnitudes', 'Amplitudes', 'Phase')
-    fig, axs = plt.subplots(4, 3, figsize=(3 * 4, 4 * 4))
+    norients = angles.shape[-1]
+    fig, axs = plt.subplots(4, norients, figsize=(norients * 4, 4 * 4))
     for row, data, t, c in zip(axs, (angles, mags, amps, phases),
                             titles, ('gnuplot2', 'gnuplot2', 'gnuplot2', 'seismic')):
         for i, ax in enumerate(row):
