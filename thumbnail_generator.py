@@ -99,7 +99,7 @@ def gen_thumbs(dirname, key='/*/*decon.tif', where='host', level=2, figsize=6,
     return dirname + os.path.sep + key
 
 
-def gen_all_thumbs(home, path_key='SIM', **kwargs):
+def gen_all_thumbs(home=".", path_key='SIM', **kwargs):
     '''
     '''
     with mp.Pool() as pool:
@@ -113,5 +113,42 @@ def gen_all_thumbs(home, path_key='SIM', **kwargs):
 
 
 if __name__ == '__main__':
-    raise NotImplementedError
-    # For cmd line utility someday.
+    # This would be a good place to try out click
+    import click
+
+    @click.command()
+    @click.option("--home", default=".",
+                  help="Home folder to start the search")
+    @click.option("--key", default="/*/*decon.tif",
+                  help="Key to choose images")
+    @click.option("--path_key", default="SIM",
+                  help="Key to choose image folders")
+    @click.option("--where", default="host", help=" ".join(
+        ['Where do you want to save the',
+         'images? Use "host" to save them in the home folder, use "in folder"',
+         'to save them where the images are. Or you can pass a path.']
+    ))
+    @click.option("--level", default=2, help="Level at which to make title")
+    @click.option("--figsize", default=6, help="Subimage size in inches")
+    @click.option("--redo", is_flag=True, help="Redo existing images")
+    @click.option("--cmap", default="inferno", help="MPL registered colormap")
+    def update_kwds(home, key, path_key, where, level, figsize, redo, cmap):
+        """A CLI to make thumbnail images of folders of images
+        """
+        default_kwds = {
+            "home": home,
+            "key": key,
+            "path_key": path_key,
+            "where": where,
+            "level": level,
+            "figsize": figsize,
+            "redo": redo,
+            "cmap": cmap
+        }
+        click.echo("{: >10} ---> {}".format("Option", "Value"))
+        click.echo("+" * 25)
+        for k, v in default_kwds.items():
+            click.echo("{: >10} ---> {}".format(k, v))
+        gen_all_thumbs(**default_kwds)
+
+    update_kwds()
