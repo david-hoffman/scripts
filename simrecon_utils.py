@@ -682,17 +682,16 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
         else:
             # test validity
             if kw_type == 'path':
-                assert os.path.exists(kw_value), '{} is an invalid path'.format(kw_value)
+                # assert os.path.exists(kw_value), '{} is an invalid path'.format(kw_value)
+                pass
             else:
                 assert isinstance(kw_value, kw_type), '{} is type {} and should have been type {}'.format(k, type(kw_value), repr(kw_type))
-            if kw_type is bool:
-                if kw_value:
-                    exc_list.append('-' + k)
-            else:
-                exc_list.append('-' + k)
-                if isinstance(kw_value, Sequence):
-                    for k in kw_value:
-                        exc_list.append(str(k))
+            exc_list.append('-' + k)
+            if kw_type is not bool:
+                # exc_list.append('-' + k)
+                if isinstance(kw_value, Sequence) and not isinstance(kw_value, str):
+                    for v in kw_value:
+                        exc_list.append(str(v))
                 else:
                     exc_list.append(str(kw_value))
 
