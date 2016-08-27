@@ -134,8 +134,8 @@ class FakePSF(object):
 
 class PSFFinder(object):
 
-    def __init__(self, stack, psfwidth=1.68, NA=0.85, pixsize=0.0975,
-                 det_wl=520, window_width=20, **kwargs):
+    def __init__(self, stack, psfwidth=1.3, NA=0.85, pixsize=0.13,
+                 det_wl=585, window_width=20, **kwargs):
         self.stack = stack
         self.peakfinder = PeakFinder(stack.max(0), psfwidth, **kwargs)
         self.peakfinder.find_blobs()
@@ -199,7 +199,7 @@ class PSFFinder(object):
             # more than one blob find
             best = np.round(
                 self.fits.iloc[blob_num][['y0', 'x0', 'sigma_x', 'amp']].values
-                ).astype(int)
+            ).astype(int)
 
             def calc_r(blob1, blob2):
                 '''
@@ -224,7 +224,7 @@ class PSFFinder(object):
                 r_min = min(
                     np.concatenate((np.array(self.stack.shape[1:3]) - best[:2],
                                     best[:2]))
-                    )
+                )
 
             # now window size equals sqrt or this
             win_size = int(round(2 * (r_min / np.sqrt(2) - best[2] * 3)))
@@ -246,7 +246,7 @@ class PSFFinder(object):
         ax2.semilogy(abs(self.radprof))
         fig.tight_layout()
 
-    def calc_infocus_psf(self):
+    def calc_infocus_psf(self, filter_kspace=True, filter_xspace=True):
         '''
         Calculate the infocus psf
         '''
@@ -267,8 +267,22 @@ class PSFFinder(object):
 
         # fft
         otf = ifftshift(fftn(fftshift(psf)))
+        # filter in k-space, if requested
+        if filter_kspace or filter_xspace:
+            yy, xx = np.indices(otf.shape[-2:]) - np.array(otf.shape[-2:])[:, np.newaxis, np.newaxis] / 2
+            r = np.hypot(yy, xx)
+        if filter_kspace:
+            # need to multiply be 1000 for the wavelength conversion (nm -> um)
+            # and need to convert pixel size to k-space, equivalent
+            mask = r < (2 * self.NA / self.det_wl * self.pixsize) * 1000 * otf.shape[-1]
+            otf *= mask
         # ifft
-        self.psf = abs(ifftshift(ifftn(fftshift(otf.mean(0)))))
+        infocus_psf = abs(ifftshift(ifftn(fftshift(otf.mean(0)))))
+        # filter in x-space if requested
+        if filter_xspace:
+            mask = r < 4 * (self.det_wl / 2 * self.NA / self.pixsize / 1000)
+            infocus_psf *= mask
+        self.psf = infocus_psf
 
     def gen_radialOTF(self, lf_cutoff=0.1, width=3, **kwargs):
         '''
