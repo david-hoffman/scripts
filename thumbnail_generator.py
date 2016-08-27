@@ -8,6 +8,7 @@ import numpy as np
 import matplotlib as mpl
 import multiprocessing as mp
 from skimage.external import tifffile as tif
+from skimage.exposure import adjust_gamma
 from dphplotting import display_grid
 
 # TODO: we could make a subclass of dict that would only contain
@@ -66,7 +67,7 @@ def clean_dirname(dirname, figsize):
 
 
 def gen_thumbs(dirname, key='/*/*decon.tif', where='host', level=2, figsize=6,
-               redo=True, **kwargs):
+               redo=True, gamma=1.0, **kwargs):
     '''
     Main function to generate and save thumbnail pngs
     '''
@@ -86,7 +87,8 @@ def gen_thumbs(dirname, key='/*/*decon.tif', where='host', level=2, figsize=6,
         if not redo and os.path.exists(save_name):
             print(save_name, "already exists, skipping")
             return dirname + os.path.sep + key
-        data = {clean_dirname(k, figsize): v for k, v in data.items()}
+        data = {clean_dirname(k, figsize): adjust_gamma(abs(v), gamma)
+                for k, v in data.items()}
         fig, ax = display_grid(data, figsize=figsize, **kwargs)
         # make the layout 'tight'
         fig.tight_layout()
@@ -131,8 +133,9 @@ if __name__ == '__main__':
     @click.option("--level", default=2, help="Level at which to make title")
     @click.option("--figsize", default=6, help="Subimage size in inches")
     @click.option("--redo", is_flag=True, help="Redo existing images")
+    @click.option("--gamma", default=1.0, help="Gamma adjustment factor")
     @click.option("--cmap", default="inferno", help="MPL registered colormap")
-    def update_kwds(home, key, path_key, where, level, figsize, redo, cmap):
+    def update_kwds(home, key, path_key, where, level, figsize, redo, gamma, cmap):
         """A CLI to make thumbnail images of folders of images
         """
         default_kwds = {
@@ -143,6 +146,7 @@ if __name__ == '__main__':
             "level": level,
             "figsize": figsize,
             "redo": redo,
+            "gamma": gamma,
             "cmap": cmap
         }
         click.echo("{: >10} ---> {}".format("Option", "Value"))
