@@ -638,6 +638,7 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
     valid_kwargs.update({
         'ndirs': int,
         'nphases': int,
+        'phaselist': Sequence,
         '2lenses': bool,
         'bessel': bool,
         'fastSIM': bool,
@@ -700,19 +701,30 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
                 pass
             else:
                 assert isinstance(kw_value, kw_type), '{} is type {} and should have been type {}'.format(k, type(kw_value), repr(kw_type))
-            exc_list.append('-' + k)
             if kw_type is not bool:
+                exc_list.append('-' + k)
                 # exc_list.append('-' + k)
                 if isinstance(kw_value, Sequence) and not isinstance(kw_value, str):
                     for v in kw_value:
-                        exc_list.append(str(v))
+                        exc_list.append(formatter(v))
                 else:
-                    exc_list.append(str(kw_value))
+                    exc_list.append(formatter(kw_value))
+            else:
+                # in this case the key word is a bool
+                # test if bool is true
+                if kw_value:
+                    exc_list.append('-' + k)
 
     # save the output
     return_code = subprocess.check_output(exc_list)
 
     return return_code.decode('utf-8').split('\n')
+
+def formatter(value):
+    if isinstance(value, float):
+        return "{:.16f}".format(value)
+    else:
+        return str(value)
 
 
 def write_mrc(input_file):
@@ -1112,7 +1124,7 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     temp_mrc = Mrc.Mrc(path.replace('.mrc', '_proc.mrc'))
     total_save_path = fullpath.replace(
         '.mrc', '_proc{}{}.mrc'.format(tile_size, extension))
-    Mrc.save(np.flipud(recon_split_data_combine),
+    Mrc.save(recon_split_data_combine,
              total_save_path,
              hdr=temp_mrc.hdr,
              ifExists='overwrite')
