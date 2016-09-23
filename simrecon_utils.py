@@ -19,7 +19,7 @@ from collections import OrderedDict, Sequence
 # import skimage components
 from peaks.peakfinder import PeakFinder
 
-from dphutils import (slice_maker, Pupil, scale_uint16, fft_pad,
+from dphutils import (slice_maker, scale_uint16, fft_pad,
                       nextpow2, radial_profile)
 try:
     from pyfftw.interfaces.numpy_fft import ifftshift, fftshift, fftn, ifftn
@@ -29,107 +29,6 @@ try:
 except ImportError:
     from numpy.fft import ifftshift, fftshift, fftn, ifftn
 from skimage.external import tifffile as tif
-
-
-class FakePSF(object):
-    '''
-    A class used to generate and save a FakePSF in MRC format using the `Pupil`
-    class found in dphutils.
-    '''
-
-    def __init__(self, NA=0.85, pixsize=0.0975, det_wl=520, n=1.0):
-        self.pupil = Pupil(1 / (pixsize * 1000), det_wl, NA, n)
-        self.pixsize = pixsize
-        # generate only the infocus
-
-    def NA():
-        doc = "The NA property."
-
-        def fget(self):
-            return self.pupil.NA
-
-        def fset(self, value):
-            self.pupil.NA = value
-
-        def fdel(self):
-            del self.pupil.NA
-        return locals()
-    NA = property(**NA())
-
-    def det_wl():
-        doc = "The det_wl property."
-
-        def fget(self):
-            return self.pupil.wl
-
-        def fset(self, value):
-            self.pupil.wl = value
-
-        def fdel(self):
-            del self.pupil.wl
-        return locals()
-    det_wl = property(**det_wl())
-
-    # def pixsize():
-    #     doc = "The pixsize property."
-    #     def fget(self):
-    #         return self.pixsize
-    #     def fset(self, value):
-    #         self.pixsize = value
-    #         self.pupil.k_max = 1/(value*1000)
-    #     def fdel(self):
-    #         del self.pupil.pixsize
-    #         del self.pupil.k_max
-    #     return locals()
-    # pixsize = property(**pixsize())
-
-    def gen_psf(self, size=512):
-        self.pupil.size = size
-        self.pupil.gen_psf([0])
-
-        self.psf = scale_uint16(self.pupil.PSFi[0])
-
-    def gen_radialOTF(self):
-        psf = self.pupil.PSFi[0].copy()
-
-        # pull the max size
-        nx = max(psf.shape)
-
-        # calculate the um^-1/pix
-        dkr = 1 / (nx * self.pixsize)
-        # save dkr for later
-        self.dkr = dkr
-        # calculate the kspace cutoff, round up (that's what the 0.5 is for)
-        krcutoff = int(2 * self.NA / (self.det_wl / 1000) / dkr + .5)
-
-        self.radprof = calc_radial_OTF(psf, krcutoff)
-
-    def save_radOTF_mrc(self, output_filename, **kwargs):
-        # make empty header
-        header = Mrc.makeHdrArray()
-        # initialize it
-        # set type and shape
-        Mrc.init_simple(header, 4, self.radprof.shape)
-        # set wavelength
-        header.wave = self.det_wl
-        # set number of wavelengths
-        header.NumWaves = 1
-        # set dimensions
-        header.d = (self.dkr,) * 3
-        tosave = self.radprof.astype(np.complex64)
-        # save it
-        tosave = tosave.reshape(1, 1, len(tosave))
-
-        Mrc.save(tosave, output_filename, hdr=header, **kwargs)
-
-    def save_PSF_mrc(self, output_filename):
-        '''
-        Object specific wrapper for general save_PSF_mrc
-        '''
-
-        # take the best blob and pad to at least 512
-
-        save_PSF_mrc(self.psf, output_filename, self.pixsize, self.det_wl)
 
 
 class PSFFinder(object):
