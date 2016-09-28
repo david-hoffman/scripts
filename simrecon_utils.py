@@ -21,6 +21,9 @@ from peaks.peakfinder import PeakFinder
 
 from dphutils import (slice_maker, scale_uint16, fft_pad,
                       nextpow2, radial_profile)
+from dphplotting import display_grid
+from pyOTF.phaseretrieval import *
+from pyOTF.utils import *
 try:
     from pyfftw.interfaces.numpy_fft import ifftshift, fftshift, fftn, ifftn
     import pyfftw
@@ -32,23 +35,19 @@ from skimage.external import tifffile as tif
 
 
 class PSFFinder(object):
-
-    def __init__(self, stack, psfwidth=1.3, NA=0.85, pixsize=0.13,
-                 det_wl=585, window_width=20, **kwargs):
+    """"""
+    
+    def __init__(self, stack, psfwidth=1.3, window_width=20, **kwargs):
+        """"""
         self.stack = stack
         self.peakfinder = PeakFinder(stack.max(0), psfwidth, **kwargs)
         self.peakfinder.find_blobs()
         self.all_blobs = self.peakfinder.blobs
-        self.NA = NA
-        self.pixsize = pixsize
-        self.det_wl = det_wl
         self.window_width = window_width
+        self.find_psfs(2 * psfwidth)
 
-        self.find_fit(2 * psfwidth)
-
-    def find_fit(self, max_s=2.1, num_peaks=20):
-        '''
-        Function to find and fit blobs in the max intensity image
+    def find_psfs(self, max_s=2.1, num_peaks=20):
+        """Function to find and fit blobs in the max intensity image
 
         Blobs with the appropriate parameters are saved for further fitting.
 
@@ -57,10 +56,8 @@ class PSFFinder(object):
         max_s: float
             Reject all peaks with a fit width greater than this
         num_peaks: int
-            The number of peaks to analyze further
-        '''
+            The number of peaks to analyze further"""
         window_width = self.window_width
-
         # pull the PeakFinder object
         my_PF = self.peakfinder
         # find blobs
@@ -74,20 +71,17 @@ class PSFFinder(object):
         blobs_df.SNR = blobs_df.dropna().SNR.round().astype(int)
         # sort by SNR then sigma_x.
         new_blobs_df = blobs_df[
-                        blobs_df.sigma_x < max_s
-                    ].sort(['amp', 'sigma_x'], ascending=False).iloc[:num_peaks]
+            blobs_df.sigma_x < max_s
+        ].sort_values(['amp', 'sigma_x'], ascending=False)
         # set the internal state to the selected blobs
         my_PF.blobs = new_blobs_df[
-                                    ['y0', 'x0', 'sigma_x', 'amp']
-                                ].values.astype(int)
+            ['y0', 'x0', 'sigma_x', 'amp']
+        ].values.astype(int)
 
         self.fits = new_blobs_df
 
     def find_window(self, blob_num=0):
-        '''
-        Finds the biggest window distance.
-        '''
-
+        """Finds the biggest window distance."""
         # pull all blobs
         blobs = self.all_blobs
         # three different cases
@@ -95,6 +89,7 @@ class PSFFinder(object):
             # no blobs in window, raise hell
             raise RuntimeError("No blobs found, can't find window")
         else:
+            # TODO: this should be refactored to use KDTrees
             # more than one blob find
             best = np.round(
                 self.fits.iloc[blob_num][['y0', 'x0', 'sigma_x', 'amp']].values
@@ -133,11 +128,61 @@ class PSFFinder(object):
 
         return window
 
-    def plot_window(self, blob_num, **kwargs):
-        '''
-        Plot all the things for this window
-        '''
+    def plot_all_windows(self):
+        """Plot all the windows so that user can choose favorite"""
+        windows = [self.find_window(i) for i in range(len(self.fits))]
+        fig, axs = display_grid({i: self.peakfinder.data[win]
+                                 for i, win in enumerate(windows)})
+        return fig, axs
 
+
+class PhaseRetriever(PSFFinder):
+    """docstring for PhaseRetriever"""
+
+    def __init__(self, stack, wl, na, ni, res, zres, **kwargs):
+        psfwidth = wl / 4 / na / res
+        super().__init__(stack, psfwidth, **kwargs)
+        # initialize model params
+        self.params = dict(
+            na=na,
+            ni=ni,
+            wl=wl,
+            res=res,
+            zres=zres,
+            zsize=stack.shape[0]
+        )
+
+    def retrieve_phase(self, blob_num=0, xysize=None, **kwargs):
+        """"""
+        window = self.find_window(blob_num)
+        data = self.stack[[Ellipsis] + window]
+        data_prepped = prep_data_for_PR(data, xysize)
+        self.params.update(dict(size=data_prepped.shape[-1]))
+        self.pr_result = retrieve_phase(data_prepped, self.params, **kwargs)
+        return self.pr_result
+
+
+class SIMOTFMaker(PSFFinder):
+
+    def __init__(self, stack, na=0.85, pixsize=0.13,
+                 det_wl=0.585, **kwargs):
+        """Find PSFs and turn them into OTFs
+
+        Parameters
+        ----------
+        stack : ndarray
+        na : float
+        pixsize : float
+        det_wl : float
+        """
+        psfwidth = det_wl / 4 / na / pixsize
+        super().__init__(stack, psfwidth, **kwargs)
+        self.na = na
+        self.pixsize = pixsize
+        self.det_wl = det_wl
+
+    def plot_window(self, blob_num, **kwargs):
+        """Plot all the things for this window"""
         self.find_window(blob_num)
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
         ax1.matshow(self.peakfinder.data[self.window])
@@ -173,50 +218,40 @@ class PSFFinder(object):
         if filter_kspace:
             # need to multiply be 1000 for the wavelength conversion (nm -> um)
             # and need to convert pixel size to k-space, equivalent
-            mask = r < (2 * self.NA / self.det_wl * self.pixsize) * 1000 * otf.shape[-1]
-            otf *= mask
+            mask = r > (2 * self.na / self.det_wl * self.pixsize) * otf.shape[-1]
+            otf[mask] = 0
         # ifft
         infocus_psf = abs(ifftshift(ifftn(fftshift(otf.mean(0)))))
         # filter in x-space if requested
         if filter_xspace:
-            mask = r < 4 * (self.det_wl / 2 * self.NA / self.pixsize / 1000)
-            infocus_psf *= mask
+            mask = r > 4 * (self.det_wl / 2 * self.na / self.pixsize)
+            infocus_psf[mask] = 0
         self.psf = infocus_psf
 
     def gen_radialOTF(self, lf_cutoff=0.1, width=3, **kwargs):
-        '''
-        Generate the Radially averaged OTF from the sample data.
-        '''
-
+        """Generate the Radially averaged OTF from the sample data."""
         img_raw = self.stack[
             [slice(None, None, None)] + self.window
         ]
-
         if img_raw.shape[-1] < 512 or img_raw.shape[-2] < 512:
             img = fft_pad(img_raw, (nextpow2(img_raw.shape[0]), 512, 512))
         else:
             img = fft_pad(img_raw)
-
         # pull the max x, y size
         nx = max(img.shape[-1:-3:-1])
-
         # calculate the um^-1/pix
         dkr = 1 / (nx * self.pixsize)
         # save dkr for later
         self.dkr = dkr
         # calculate the kspace cutoff, round up (that's what the 0.5 is for)
-        krcutoff = int(2 * self.NA / (self.det_wl / 1000) / dkr + .5)
-
+        krcutoff = int(2 * self.na / (self.det_wl) / dkr + .5)
         radprof = calc_radial_OTF(img, krcutoff, **kwargs)
-
         if lf_cutoff is not None:
             # if given a cutoff linearly fit the points around it to a line
             # then interpolate the line back to the origin starting at the low
             # frequency
-
             # find the cutoff in terms of pixels
             mid_num = int(lf_cutoff / dkr + .5)
-
             # choose the low frequency
             lf = mid_num - width
             if lf > 0:
@@ -238,7 +273,7 @@ class PSFFinder(object):
 
         print('Better cutoff is {:.3f}'.format(
             (abs(self.radprof[:krcutoff]).argmin() -
-             1) / (2 / (self.det_wl / 1000) / self.dkr)))
+             1) / (2 / (self.det_wl) / self.dkr)))
 
     def save_radOTF_mrc(self, output_filename, **kwargs):
         # make empty header
@@ -247,7 +282,7 @@ class PSFFinder(object):
         # set type and shape
         Mrc.init_simple(header, 4, self.radprof.shape)
         # set wavelength
-        header.wave = self.det_wl
+        header.wave = self.det_wl * 1000
         # set number of wavelengths
         header.NumWaves = 1
         # set dimensions
@@ -319,7 +354,7 @@ def save_PSF_mrc(img, output_filename, pixsize=0.0975, det_wl=520):
     return output_filename
 
 
-def calc_radial_mrc(infile, outfile=None, NA=0.85, L=8, H=22):
+def calc_radial_mrc(infile, outfile=None, na=0.85, L=8, H=22):
     '''
     A simple wrapper around the radial OTF calc
     '''
@@ -334,17 +369,17 @@ def calc_radial_mrc(infile, outfile=None, NA=0.85, L=8, H=22):
 
     # write our string to send to the shell
     # 8 is the lower pixel and 22 is the higher pixel
-    # 0.8 is the detection NA
-    # otfcalc = r'C:\newradialft\otf2d -N {NA} -L {L} -H {H} {infile} {outfile}'
+    # 0.8 is the detection na
+    # otfcalc = r'C:\newradialft\otf2d -N {na} -L {L} -H {H} {infile} {outfile}'
 
     # format the string
-    # excstr = otfcalc.format(infile=infile, outfile=outfile, NA=NA, L=L, H=H)
+    # excstr = otfcalc.format(infile=infile, outfile=outfile, na=na, L=L, H=H)
     # send to shell
     # os.system(excstr)
 
     return_code = subprocess.call([
                                   r'C:\newradialft\otf2d',
-                                  '-N', str(NA),
+                                  '-N', str(na),
                                   '-L', str(L),
                                   '-H', str(H),
                                   infile,
@@ -465,7 +500,7 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
     ls: float
         the illumination pattern's line spacing (in microns)
     na: float
-        the (effective) NA of the objective
+        the (effective) na of the objective
     nimm: float
         the index of refraction of the immersion liquid
     saveprefiltered: path
