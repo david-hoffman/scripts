@@ -35,10 +35,20 @@ from skimage.external import tifffile as tif
 
 
 class PSFFinder(object):
-    """"""
-    
+    """Object to find and analyze subdiffractive emmitters"""
+
     def __init__(self, stack, psfwidth=1.3, window_width=20, **kwargs):
-        """"""
+        """Analyze a z-stack of subdiffractive emmitters
+
+        Parameters
+        ----------
+        stack : ndarray
+
+
+        Kwargs
+        ------
+        psfwidth : float
+        window_width : int"""
         self.stack = stack
         self.peakfinder = PeakFinder(stack.max(0), psfwidth, **kwargs)
         self.peakfinder.find_blobs()
@@ -69,16 +79,19 @@ class PSFFinder(object):
         blobs_df = my_PF.fit_blobs(window_width)
         # round to make sorting a little more meaningfull
         blobs_df.SNR = blobs_df.dropna().SNR.round().astype(int)
-        # sort by SNR then sigma_x.
+        # sort by SNR then sigma_x after filtering for unreasonably
+        # large blobs
         new_blobs_df = blobs_df[
             blobs_df.sigma_x < max_s
-        ].sort_values(['amp', 'sigma_x'], ascending=False)
+        ].sort_values(
+            ['SNR', 'sigma_x'], ascending=[False, True]
+        )
         # set the internal state to the selected blobs
         my_PF.blobs = new_blobs_df[
             ['y0', 'x0', 'sigma_x', 'amp']
         ].values.astype(int)
-
-        self.fits = new_blobs_df
+        # reindex data frame here
+        self.fits = new_blobs_df.reset_index(drop=True)
 
     def find_window(self, blob_num=0):
         """Finds the biggest window distance."""
@@ -103,10 +116,8 @@ class PSFFinder(object):
                 y2, x2, s2, a2 = blob2
 
                 return np.sqrt((y1 - y2)**2 + (x1 - x2)**2)
-
             # calc distances
             r = np.array([calc_r(best, blob) for blob in blobs])
-
             # find min distances
             # remember that best is in blobs so 0 will be in the list
             # find the next value
@@ -119,7 +130,6 @@ class PSFFinder(object):
                     np.concatenate((np.array(self.stack.shape[1:3]) - best[:2],
                                     best[:2]))
                 )
-
             # now window size equals sqrt or this
             win_size = int(round(2 * (r_min / np.sqrt(2) - best[2] * 3)))
 
@@ -137,9 +147,10 @@ class PSFFinder(object):
 
 
 class PhaseRetriever(PSFFinder):
-    """docstring for PhaseRetriever"""
+    """Utility to phase retrieve mutltiple emitters in a single dataset"""
 
     def __init__(self, stack, wl, na, ni, res, zres, **kwargs):
+        """"""
         psfwidth = wl / 4 / na / res
         super().__init__(stack, psfwidth, **kwargs)
         # initialize model params
