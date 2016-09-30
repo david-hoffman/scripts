@@ -221,7 +221,7 @@ class SIMOTFMaker(PSFFinder):
         # TODO: add this part
 
         # fft
-        otf = ifftshift(fftn(fftshift(psf)))
+        otf = ifftshift(fftn(fftshift(psf))).mean(0)
         # filter in k-space, if requested
         if filter_kspace or filter_xspace:
             yy, xx = np.indices(otf.shape[-2:]) - np.array(otf.shape[-2:])[:, np.newaxis, np.newaxis] / 2
@@ -232,7 +232,7 @@ class SIMOTFMaker(PSFFinder):
             mask = r > (2 * self.na / self.det_wl * self.pixsize) * otf.shape[-1]
             otf[mask] = 0
         # ifft
-        infocus_psf = abs(ifftshift(ifftn(fftshift(otf.mean(0)))))
+        infocus_psf = abs(ifftshift(ifftn(fftshift(otf))))
         # filter in x-space if requested
         if filter_xspace:
             mask = r > 4 * (self.det_wl / 2 * self.na / self.pixsize)
