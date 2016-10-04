@@ -80,18 +80,17 @@ class PSFFinder(object):
         # round to make sorting a little more meaningfull
         blobs_df.SNR = blobs_df.dropna().SNR.round().astype(int)
         # sort by SNR then sigma_x after filtering for unreasonably
-        # large blobs
+        # large blobs and reindex data frame here
         new_blobs_df = blobs_df[
             blobs_df.sigma_x < max_s
         ].sort_values(
             ['SNR', 'sigma_x'], ascending=[False, True]
-        )
+        ).reset_index(drop=True)
         # set the internal state to the selected blobs
         my_PF.blobs = new_blobs_df[
             ['y0', 'x0', 'sigma_x', 'amp']
         ].values.astype(int)
-        # reindex data frame here
-        self.fits = new_blobs_df.reset_index(drop=True)
+        self.fits = new_blobs_df
 
     def find_window(self, blob_num=0):
         """Finds the biggest window distance."""
@@ -109,12 +108,9 @@ class PSFFinder(object):
             ).astype(int)
 
             def calc_r(blob1, blob2):
-                '''
-                Calc euclidean distance between blob1 and blob2
-                '''
+                """Calc euclidean distance between blob1 and blob2"""
                 y1, x1, s1, a1 = blob1
                 y2, x2, s2, a2 = blob2
-
                 return np.sqrt((y1 - y2)**2 + (x1 - x2)**2)
             # calc distances
             r = np.array([calc_r(best, blob) for blob in blobs])
