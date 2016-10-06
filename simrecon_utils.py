@@ -420,7 +420,7 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
     bessel: bool
         data acquired with Bessel beam SIM
     fastSIM: bool
-        data acquired with fast live SIM
+        data acquired with fast live SIM, i.e. data organized into (nz, ndirs, nphases)
     recalcarray: int (default is 1)
         how many times do you want to re-calculuate overlapping arrays
     inputapo: int
