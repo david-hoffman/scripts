@@ -135,7 +135,8 @@ if __name__ == '__main__':
     @click.option("--redo", is_flag=True, help="Redo existing images")
     @click.option("--gamma", default=1.0, help="Gamma adjustment factor")
     @click.option("--cmap", default="inferno", help="MPL registered colormap")
-    def update_kwds(home, key, path_key, where, level, figsize, redo, gamma, cmap):
+    @click.option("--auto", is_flag=True, help="Automatically determine color levels")
+    def update_kwds(home, key, path_key, where, level, figsize, redo, gamma, cmap, auto):
         """A CLI to make thumbnail images of folders of images
         """
         default_kwds = {
@@ -147,7 +148,8 @@ if __name__ == '__main__':
             "figsize": figsize,
             "redo": redo,
             "gamma": gamma,
-            "cmap": cmap
+            "cmap": cmap,
+            "auto": auto
         }
         click.echo("{: >10} ---> {}".format("Option", "Value"))
         click.echo("+" * 25)
