@@ -25,12 +25,13 @@ from dphplotting import display_grid
 from pyOTF.phaseretrieval import *
 from pyOTF.utils import *
 try:
-    from pyfftw.interfaces.numpy_fft import ifftshift, fftshift, fftn, ifftn
+    from pyfftw.interfaces.numpy_fft import (ifftshift, fftshift, fftn, ifftn,
+                                             fftfreq, rfftfreq)
     import pyfftw
     # Turn on the cache for optimum performance
     pyfftw.interfaces.cache.enable()
 except ImportError:
-    from numpy.fft import ifftshift, fftshift, fftn, ifftn
+    from numpy.fft import ifftshift, fftshift, fftn, ifftn, fftfreq, rfftfreq
 from skimage.external import tifffile as tif
 
 
@@ -273,7 +274,7 @@ class SIMOTFMaker(PSFFinder):
             else:
                 # set DC to mid_num to mid_num
                 radprof[:mid_num] = radprof[mid_num]
-
+            # TODO: add bit to remove average phase angle from profile.
             radprof /= radprof.max()
 
         self.radprof = radprof
@@ -394,6 +395,323 @@ def calc_radial_mrc(infile, outfile=None, na=0.85, L=8, H=22):
                                   ])
 
     return return_code
+
+# Here lie all the bits for processing a 3D otf, this code I'm not proud of at
+# all but it seems to work
+
+
+def center_data(data, max_loc=None):
+    """Utility to center the data
+
+    Parameters
+    ----------
+    data : ndarray
+        Array of data points
+
+    Returns
+    -------
+    centered_data : ndarray same shape as data
+        data with max value at the central location of the array
+    """
+    if max_loc is None:
+        max_loc = np.unravel_index(data.argmax(), data.shape)
+    # copy data
+    centered_data = data.copy()
+    # extract shape and max location
+    data_shape = data.shape
+    # iterate through dimensions and roll data to the right place
+    for i, (x0, nx) in enumerate(zip(max_loc, data_shape)):
+        if x0 is not None:
+            centered_data = np.roll(centered_data, (nx + 1) // 2 - x0, i)
+    return centered_data
+
+
+def makematrix(nphases, norders):
+    """Make a separation matrix
+
+    See Gustafsson 2008 Bio Phys J"""
+    # phi is the phase step
+    phi = 2 * np.pi / nphases
+    # number of columns is determined by the number of orders
+    cols = (norders * 2 + 1)
+    # prepare an empty array to fill
+    # this is very poor numpy coding but this will never be the bottleneck
+    sep_mat = np.zeros(nphases * cols)
+    # fill the matrix
+    for j in range(nphases):
+        sep_mat[0 * nphases + j] = 1.0
+        for order in range(1, norders + 1):
+            sep_mat[(2 * order - 1) * nphases + j] = cos(j * order * phi)
+            sep_mat[2 * order * nphases + j] = sin(j * order * phi)
+    return sep_mat.reshape(nphases, cols)
+
+
+def rescale(otf):
+    """Takes a radially averaged otf and scales by max of 0th order"""
+    # assume OTF has arrangement: order, z, r
+    scale_factor = abs(otf[0]).max()
+    return otf / scale_factor
+
+
+def rfft_trunk(nx):
+    """just to test function below"""
+    return nx // 2 + 1
+
+
+def irfft_trunk(nx):
+    """undo the trunkation along the real axis when performing an rfft"""
+    return (nx - nx % 2) * 2
+
+
+def test_rfft_trunc():
+    """Test forward and backward truncs"""
+    assert 0 == irfft_trunk(0)
+    kx = 512
+    assert kx == irfft_trunk(rfft_trunk(kx))
+
+
+def _kspace_coords(dz, dr, shape):
+    """Make the kspace coordinates for a radially averaged OTF
+
+    Right now the function assumes that the extent of dr is the extent of dx"""
+    # split open shape
+    nz, nr = shape
+    # calculate kz, kr freqs, assume that all data has been shifted back
+    kz = ifftshift(fftfreq(nz, dz))
+    kr = rfftfreq(irfft_trunk(nr), dr)
+    # determine delta kz
+    dkz = kz[1] - kz[0]
+    dkr = kr[1] - kr[0]
+    # make the grids
+    krr, kzz = np.meshgrid(kr, kz)
+    return kzz, krr, dkz, dkr
+
+
+def makemask(wl, na, ni, dz, dr, shape, offset=(0, 0), expansion=0):
+    """Make a mask for the 3D OTF radially averaged
+
+    Parameters
+    ----------
+    wl : float
+        Wavelength of emission of data in nm
+    na : float
+        Numerical aperature of objective
+    ni : float
+        Index of refraction of media
+    dz : float
+        z resolution in nm
+    dr : float
+        x/y resolution, in nm
+    shape : tuple
+        shape of data
+    offset : tuple
+        The offset of the mask, in units of pixels
+    expansion : float
+        The expansion (or contraction) of the mask, in pixels
+
+    Returns
+    -------
+    mask : ndarray
+        A boolean array of shape `shape` that masks the otf outside its
+        theoretical support
+    """
+    # unpack offsets
+    z_offset, r_offset = offset
+    # make k-space coordinates
+    kz, kr, dkz, dkr = _kspace_coords(dz, dr, shape)
+    kr_max = ni / wl  # the radius of the spherical shell
+    kr_0 = na / wl  # the offset of the circle from the origin
+    # z displacement of circle's center
+    z0 = np.sqrt(kr_max ** 2 - kr_0 ** 2)
+    # expand mask if requested
+    kr_max += dkr * expansion
+    # calculate centered kr
+    cent_kr = kr - kr_0 - r_offset * dkr
+    # calculate top half
+    onehalf = np.hypot(cent_kr, kz - z0 - z_offset * dkz) <= kr_max
+    # calculate bottom half
+    otherhalf = np.hypot(cent_kr, kz + z0 - z_offset * dkz) <= kr_max
+    mask = np.logical_and(otherhalf, onehalf)
+    return mask
+
+
+def find_origin(rad_prof):
+    """Find the origin in a radially averaged profile"""
+    # copy data, otherwise it will be changed
+    data = rad_prof.copy()
+    # grab shape
+    nz, nr = data.shape
+    # suppress pure DC
+    data[(nz + 1) // 2, 0] = 0
+    # find new max
+    max_loc = np.unravel_index(abs(data).argmax(), data.shape)
+    # only return kz component
+    return max_loc[0]
+
+
+def find_offsets(rad_prof):
+    """find the offsets of the OTF bands"""
+    # find potential origin
+    dz = find_origin(rad_prof)
+    nz, nr = rad_prof.shape
+    center = (nz + 1) // 2
+    if dz == center:
+        # if potential origin is same as center return zero
+        return (0,)
+    else:
+        # else assume we have a band with two fold symmetry and we
+        # should return the above and below parts
+        return dz - center, center - dz
+
+
+def mask_rad_prof(rad_prof, exp_args):
+    """Mask off the radial profiles according to the experimental arguments
+
+    Returns both the mask and the masked radial profile"""
+    offsets = find_offsets(rad_prof)
+    masks = np.array([makemask(*exp_args, rad_prof.shape, offset=(o, 0))
+                      for o in offsets])
+    mask = np.logical_or.reduce(masks, 0)
+    return rad_prof * mask, mask
+
+
+def correct_phase_angle(band, mask):
+    """Remove the average phase angle"""
+    # norm all values so they're on the unit circle
+    # only use valid values within otf theoretical support
+    valid_values = band[mask]
+    normed = valid_values / abs(valid_values)
+    # calculate angle of average
+    phi = np.angle(normed.mean())
+    # shift band to remove average phase angle
+    a = band * np.exp(-1j * phi)
+    # set everything outside suppor to zero
+    a[np.logical_not(mask)] = 0
+    return a
+
+
+def average_pm_kz(data):
+    """Average the top and bottom of the otf which should be conjugate
+    symmetric"""
+    # assume data has kz axis first
+    nz = data.shape[0]
+    data_top = data[:nz // 2]
+    # + 1 here in case nz odd
+    data_bottom = data[(nz + 1) // 2:]
+    data_avg = (data_top + np.conj(data_bottom[::-1])) / 2
+    if nz % 2:
+        # nz is odd
+        return np.concatenate((data_avg, data[nz // 2],
+                               np.conj(data_avg[::-1])))
+    else:
+        # nz is even
+        return np.concatenate((data_avg, np.conj(data_avg[::-1])))
+
+
+class PSF3DProcessor(object):
+    """An object designed to turn a 3D SIM PSF into a 3D SIM radially averaged
+    OTF"""
+
+    def __init__(self, data, exp_args):
+        """Initialize the object, assumes data is already organized as:
+        directions, phases, z, y, x
+
+        exp_args holds all the experimental parameters (should be dict):
+        wl, na, ni, zres, rres"""
+        # set up internal data
+        self.data = data
+        # extract experimental args
+        self.wl, na, ni, dz, dr = exp_args
+        # get ndirs etc
+        self.ndirs, self.nphases, self.nz, self.ny, self.nx = data.shape
+        # remove background
+        data_nobg = self.remove_bg()
+        # average along directions and phases to make widefield psf
+        self.conv_psf = conv_psf = data_nobg.mean((0, 1))
+        # separate data
+        sep_data = self.separate_data()
+        # center the data using the conventional psf center
+        psf_max_loc = np.unravel_index(conv_psf.argmax(), conv_psf.shape)
+        cent_data = center_data(sep_data, (None, ) + psf_max_loc)
+        # take rfft along spatial dimensions (get seperated OTFs)
+        # last ifftshift isn't performed along las axis, because it's the real
+        # axis
+        self.cent_data_fft_sep = ifftshift(rfftn(fftshift(
+            cent_data, axes=(1, 2, 3)), axes=(1, 2, 3)), axes=(1, 2)
+        )
+        self.avg_and_mask()
+        # get spacings and save for later
+        kzz, krr, self.dkz, self.dkr = _kspace_coords(dz, dr, masks[0].shape)
+        # average bands (hard coded for convenience)
+        corrected_profs = np.array([
+            correct_phase_angle(b, m)
+            for b, m in zip(self.masked_rad_profs, self.masks)
+        ])
+        band0 = corrected_profs[0]
+        band1 = (corrected_profs[1] + corrected_profs[2]) / 2
+        band2 = (corrected_profs[3] + corrected_profs[4]) / 2
+        bands = np.array((band0, band1, band2))
+        self.bands = np.array([average_pm_kz(band) for band in bands])
+
+    def remove_bg(self):
+        """find mode and background subtract"""
+        self.mode = mode = np.bincount(data.ravel()).argmax()
+        self.data_nobg = data - 1.0 * mode
+        return self.data_nobg
+
+    def separate_data(self):
+        """Separate the different bands"""
+        # make the separation matrix and apply it
+        sep_mat = makematrix(self.nphases, self.nphases // 2)
+        # add extra axis to "store" the linear combinations of the "vectors"
+        # (we really need to sum along this axis to get the linear combos)
+        # sum the linear combinations and take mean along directions
+        # to make the broadcasting work we need to expand out the separation
+        # matrix now too. The data ordering is now:
+        # dirs, combos, phases, z, y, x
+        sep_mat = sep_mat[np.newaxis, :, :, np.newaxis, np.newaxis, np.newaxis]
+        # this multiplication recombines each phase image
+        temp_data = (self.data_nobg[:, np.newaxis] * sep_mat)
+        # sum the weighted images (linear combination) and take mean along
+        # directions
+        self.sep_data = temp_data.sum(2).mean(0)
+        return self.sep_data
+
+    def avg_and_mask(self):
+        # radially average the OTFs
+        # for each otf in the seperated data and for each kz plane calculate
+        # the radial average center the radial average at 0 for last axis
+        # because of real fft
+        center = ((self.ny + 1) // 2, 0)
+        extent = self.nx // 2 + 1
+        self.r_3D = r_3D = np.array([
+            [radial_profile(o, center)[0][:extent]
+             for o in z] for z in self.cent_data_fft_sep
+        ])
+        # mask OTFs and retrieve masks
+        self.masked_rad_profs, masks = np.swapaxes(
+            np.array([mask_rad_prof(r, exp_args) for r in r_3D]), 0, 1
+        )
+        # convert masks to bool (they've been cast to complex in the above)
+        self.masks = masks.astype(bool)
+
+    def save_radOTF_mrc(self, output_filename, **kwargs):
+        # make empty header
+        header = Mrc.makeHdrArray()
+        # initialize it
+        # set type and shape
+        Mrc.init_simple(header, 4, self.bands.shape)
+        # set wavelength
+        header.wave = self.wl
+        # set number of wavelengths
+        header.NumWaves = 1
+        # set dimensions
+        header.d = (self.dkz * 1000, self.dkr * 1000, 0.0)
+        bands = swapaxes(self.bands, 1, 2)
+        bands = rescale(fftshift(bands, axes=2))
+        tosave = bands.astype(np.complex64)
+
+        Mrc.save(tosave, output_filename, hdr=header, **kwargs)
 
 
 def simrecon(*, input_file, output_file, otf_file, **kwargs):
@@ -522,6 +840,8 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
     input_file = os.path.abspath(input_file)
     output_file = os.path.abspath(output_file)
     otf_file = os.path.abspath(otf_file)
+    for file in (input_file, otf_file):
+        assert os.path.exists(file), "{} doesn't exist!".format(file)
     # the list to pass to subprocess.call, this is just the beginning
     exc_list = [r'C:\SIMrecon_svn\sirecon', input_file, output_file, otf_file]
     # insert default values into **kwargs here
