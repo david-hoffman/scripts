@@ -998,7 +998,7 @@ def calc_radial_OTF(psf, krcutoff=None, show_OTF=False):
     # recenter
     # TODO: add this part
 
-    # fft
+    # fft, switch to rfft
     otf = ifftshift(fftn(fftshift(newpsf)))
 
     if show_OTF:
@@ -1019,9 +1019,15 @@ def calc_radial_OTF(psf, krcutoff=None, show_OTF=False):
     radprof /= radprof.max()
 
     if krcutoff is not None:
+        # calculate mean phase angle of data within diffraction limit
+        temp = radprof[:krcutoff]
+        temp /= abs(temp)
+        phi = np.angle(mean(temp))
+        # remove mean phase angle
+        radprof *= np.exp(-1j * phi)
         # set everything beyond the diffraction limit to 0
         radprof[krcutoff:] = 0
-
+    # return
     return radprof
 
 
