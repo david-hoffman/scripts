@@ -202,21 +202,12 @@ class SIMOTFMaker(PSFFinder):
         '''
         Calculate the infocus psf
         '''
-        img_raw = self.stack[
-            [slice(None, None, None)] + self.window
-        ]
-
-        img = fft_pad(img_raw)
-        # estimate the background, use the mode.
-        try:
-            offset = np.bincount(img_raw.ravel()).argmax()
-        except TypeError:
-            offset = np.median(img_raw)
-        # remove background from PSF
-        psf = img.astype(float) - offset
+        img_raw = self.stack[[Ellipsis] + self.window]
+        img_raw = remove_bg(img_raw, 1.0)
+        # pad image
+        psf = fft_pad(img_raw)
         # recenter
         # TODO: add this part
-
         # fft
         otf = ifftshift(fftn(fftshift(psf))).mean(0)
         # filter in k-space, if requested
@@ -238,9 +229,8 @@ class SIMOTFMaker(PSFFinder):
 
     def gen_radialOTF(self, lf_cutoff=0.1, width=3, **kwargs):
         """Generate the Radially averaged OTF from the sample data."""
-        img_raw = self.stack[
-            [slice(None, None, None)] + self.window
-        ]
+        img_raw = self.stack[[Ellipsis] + self.window]
+        img_raw = remove_bg(img_raw, 1.0)
         if img_raw.shape[-1] < 512 or img_raw.shape[-2] < 512:
             img = fft_pad(img_raw, (nextpow2(img_raw.shape[0]), 512, 512))
         else:
@@ -625,7 +615,7 @@ class PSF3DProcessor(object):
         # get ndirs etc
         self.ndirs, self.nphases, self.nz, self.ny, self.nx = data.shape
         # remove background
-        data_nobg = self.remove_bg()
+        self.data_nobg = data_nobg = remove_bg(self.data, 1.0)
         # average along directions and phases to make widefield psf
         self.conv_psf = conv_psf = data_nobg.mean((0, 1))
         # separate data
@@ -652,12 +642,6 @@ class PSF3DProcessor(object):
         band2 = (corrected_profs[3] + corrected_profs[4]) / 2
         bands = np.array((band0, band1, band2))
         self.bands = np.array([average_pm_kz(band) for band in bands])
-
-    def remove_bg(self):
-        """find mode and background subtract"""
-        self.mode = mode = np.bincount(data.ravel()).argmax()
-        self.data_nobg = data - 1.0 * mode
-        return self.data_nobg
 
     def separate_data(self):
         """Separate the different bands"""
@@ -1010,14 +994,7 @@ def calc_radial_OTF(psf, krcutoff=None, show_OTF=False):
     radprof: ndarray, 1-dim, complex
         Radially averaged OTF
     '''
-    # need to add bit to move max to center.
-    # estimate the background, use the mode.
-    try:
-        offset = np.bincount(psf.ravel()).argmax()
-    except TypeError:
-        offset = np.median(psf)
-    # remove background from PSF
-    newpsf = psf.astype(float) - offset
+    # assumes background has already been removed from PSF
     # recenter
     # TODO: add this part
 
