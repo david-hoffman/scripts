@@ -412,7 +412,7 @@ def center_data(data, max_loc=None):
     # iterate through dimensions and roll data to the right place
     for i, (x0, nx) in enumerate(zip(max_loc, data_shape)):
         if x0 is not None:
-            centered_data = np.roll(centered_data, (nx + 1) // 2 - x0, i)
+            centered_data = np.roll(centered_data, nx // 2 - x0, i)
     return centered_data
 
 
@@ -586,18 +586,24 @@ def average_pm_kz(data):
     symmetric"""
     # assume data has kz axis first
     nz = data.shape[0]
-    data_top = data[:nz // 2]
-    # + 1 here in case nz odd
-    data_bottom = data[(nz + 1) // 2:]
-    data_avg = (data_top + np.conj(data_bottom[::-1])) / 2
     # TODO: this part needs work!
     if nz % 2:
         # nz is odd
-        return np.concatenate((data_avg, data[np.newaxis, (nz + 1) // 2],
+        data_top = data[:nz // 2]
+        # + 1 here in case nz odd
+        data_bottom = data[nz // 2 + 1:]
+        data_avg = (data_top + np.conj(data_bottom[::-1])) / 2
+        return np.concatenate((data_avg, data[np.newaxis, nz // 2],
                                np.conj(data_avg[::-1])))
     else:
         # nz is even
-        return np.concatenate((data_avg, np.conj(data_avg[::-1])))
+        data_top = data[1:nz // 2]
+        # + 1 here in case nz odd
+        data_bottom = data[nz // 2 + 1:]
+        data_avg = (data_top + np.conj(data_bottom[::-1])) / 2
+        return np.concatenate((data[np.newaxis, 0], data_avg,
+                               data[np.newaxis, nz // 2],
+                               np.conj(data_avg[::-1])))
 
 
 class PSF3DProcessor(object):
@@ -643,7 +649,7 @@ class PSF3DProcessor(object):
         band1 = (corrected_profs[1] + corrected_profs[2]) / 2
         band2 = (corrected_profs[3] + corrected_profs[4]) / 2
         self.bands = np.array((band0, band1, band2))
-        # self.bands = np.array([average_pm_kz(band) for band in self.bands])
+        self.bands = np.array([average_pm_kz(band) for band in self.bands])
 
     def separate_data(self):
         """Separate the different bands"""
