@@ -26,12 +26,12 @@ from pyOTF.phaseretrieval import *
 from pyOTF.utils import *
 try:
     from pyfftw.interfaces.numpy_fft import (ifftshift, fftshift, fftn, ifftn,
-                                             fftfreq, rfftfreq)
+                                             rfftn, fftfreq, rfftfreq)
     import pyfftw
     # Turn on the cache for optimum performance
     pyfftw.interfaces.cache.enable()
 except ImportError:
-    from numpy.fft import ifftshift, fftshift, fftn, ifftn, fftfreq, rfftfreq
+    from numpy.fft import ifftshift, fftshift, fftn, ifftn, rfftn, fftfreq, rfftfreq
 from skimage.external import tifffile as tif
 
 
@@ -431,8 +431,8 @@ def makematrix(nphases, norders):
     for j in range(nphases):
         sep_mat[0 * nphases + j] = 1.0
         for order in range(1, norders + 1):
-            sep_mat[(2 * order - 1) * nphases + j] = cos(j * order * phi)
-            sep_mat[2 * order * nphases + j] = sin(j * order * phi)
+            sep_mat[(2 * order - 1) * nphases + j] = np.cos(j * order * phi)
+            sep_mat[2 * order * nphases + j] = np.sin(j * order * phi)
     return sep_mat.reshape(nphases, cols)
 
 
@@ -467,7 +467,7 @@ def _kspace_coords(dz, dr, shape):
     # split open shape
     nz, nr = shape
     # calculate kz, kr freqs, assume that all data has been shifted back
-    kz = ifftshift(fftfreq(nz, dz))
+    kz = fftshift(fftfreq(nz, dz))
     kr = rfftfreq(irfft_trunk(nr), dr)
     # determine delta kz
     dkz = kz[1] - kz[0]
@@ -570,6 +570,7 @@ def correct_phase_angle(band, mask):
     # norm all values so they're on the unit circle
     # only use valid values within otf theoretical support
     valid_values = band[mask]
+    assert valid_values.size, "There are not valid values!"
     normed = valid_values / abs(valid_values)
     # calculate angle of average
     phi = np.angle(normed.mean())
@@ -589,9 +590,10 @@ def average_pm_kz(data):
     # + 1 here in case nz odd
     data_bottom = data[(nz + 1) // 2:]
     data_avg = (data_top + np.conj(data_bottom[::-1])) / 2
+    # TODO: this part needs work!
     if nz % 2:
         # nz is odd
-        return np.concatenate((data_avg, data[nz // 2],
+        return np.concatenate((data_avg, data[np.newaxis, (nz + 1) // 2],
                                np.conj(data_avg[::-1])))
     else:
         # nz is even
@@ -611,7 +613,7 @@ class PSF3DProcessor(object):
         # set up internal data
         self.data = data
         # extract experimental args
-        self.wl, na, ni, dz, dr = exp_args
+        self.exp_args = self.wl, na, ni, dz, dr = exp_args
         # get ndirs etc
         self.ndirs, self.nphases, self.nz, self.ny, self.nx = data.shape
         # remove background
@@ -631,7 +633,7 @@ class PSF3DProcessor(object):
         )
         self.avg_and_mask()
         # get spacings and save for later
-        kzz, krr, self.dkz, self.dkr = _kspace_coords(dz, dr, masks[0].shape)
+        kzz, krr, self.dkz, self.dkr = _kspace_coords(dz, dr, self.masks[0].shape)
         # average bands (hard coded for convenience)
         corrected_profs = np.array([
             correct_phase_angle(b, m)
@@ -640,8 +642,8 @@ class PSF3DProcessor(object):
         band0 = corrected_profs[0]
         band1 = (corrected_profs[1] + corrected_profs[2]) / 2
         band2 = (corrected_profs[3] + corrected_profs[4]) / 2
-        bands = np.array((band0, band1, band2))
-        self.bands = np.array([average_pm_kz(band) for band in bands])
+        self.bands = np.array((band0, band1, band2))
+        # self.bands = np.array([average_pm_kz(band) for band in self.bands])
 
     def separate_data(self):
         """Separate the different bands"""
@@ -674,7 +676,7 @@ class PSF3DProcessor(object):
         ])
         # mask OTFs and retrieve masks
         self.masked_rad_profs, masks = np.swapaxes(
-            np.array([mask_rad_prof(r, exp_args) for r in r_3D]), 0, 1
+            np.array([mask_rad_prof(r, self.exp_args) for r in r_3D]), 0, 1
         )
         # convert masks to bool (they've been cast to complex in the above)
         self.masks = masks.astype(bool)
