@@ -24,11 +24,11 @@ from dphplotting import display_grid
 from dphutils import scale
 from scipy.ndimage import gaussian_filter
 try:
-    from pyfftw.interfaces.scipy_fftpack import ifftshift, fftshift, fftn
+    from pyfftw.interfaces.scipy_fftpack import fftshift, ifftshift, fftn
     import pyfftw
     pyfftw.interfaces.cache.enable()
 except ImportError:
-    from scipy.fftpack import ifftshift, fftshift, fftn
+    from scipy.fftpack import fftshift, ifftshift, fftn
 from matplotlib.colors import LogNorm
 
 
@@ -41,8 +41,8 @@ def simcheck(data, nphases):
     newshape = norients, nphases, data.shape[-2], data.shape[-1]
 
     # FT data only along spatial dimensions
-    ft_data = ifftshift(
-                fftn(fftshift(
+    ft_data = fftshift(
+                fftn(ifftshift(
                     data, axes=(1, 2)),
                  axes=(1, 2)),
             axes=(1, 2))

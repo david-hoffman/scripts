@@ -25,13 +25,13 @@ from dphplotting import display_grid
 from pyOTF.phaseretrieval import *
 from pyOTF.utils import *
 try:
-    from pyfftw.interfaces.numpy_fft import (ifftshift, fftshift, fftn, ifftn,
+    from pyfftw.interfaces.numpy_fft import (fftshift, ifftshift, fftn, ifftn,
                                              rfftn, fftfreq, rfftfreq)
     import pyfftw
     # Turn on the cache for optimum performance
     pyfftw.interfaces.cache.enable()
 except ImportError:
-    from numpy.fft import ifftshift, fftshift, fftn, ifftn, rfftn, fftfreq, rfftfreq
+    from numpy.fft import fftshift, ifftshift, fftn, ifftn, rfftn, fftfreq, rfftfreq
 from skimage.external import tifffile as tif
 
 
@@ -209,7 +209,7 @@ class SIMOTFMaker(PSFFinder):
         # recenter
         # TODO: add this part
         # fft
-        otf = ifftshift(fftn(fftshift(psf))).mean(0)
+        otf = fftshift(fftn(ifftshift(psf))).mean(0)
         # filter in k-space, if requested
         if filter_kspace or filter_xspace:
             yy, xx = np.indices(otf.shape[-2:]) - np.array(otf.shape[-2:])[:, np.newaxis, np.newaxis] / 2
@@ -220,7 +220,7 @@ class SIMOTFMaker(PSFFinder):
             mask = r > (2 * self.na / self.det_wl * self.pixsize) * otf.shape[-1]
             otf[mask] = 0
         # ifft
-        infocus_psf = abs(ifftshift(ifftn(fftshift(otf))))
+        infocus_psf = abs(fftshift(ifftn(ifftshift(otf))))
         # filter in x-space if requested
         if filter_xspace:
             mask = r > 4 * (self.det_wl / 2 * self.na / self.pixsize)
@@ -544,7 +544,7 @@ def find_offsets(rad_prof):
     # find potential origin
     dz = find_origin(rad_prof)
     nz, nr = rad_prof.shape
-    center = (nz + 1) // 2
+    center = nz // 2
     if dz == center:
         # if potential origin is same as center return zero
         return (0,)
@@ -626,9 +626,9 @@ class PSF3DProcessor(object):
         psf_max_loc = np.unravel_index(conv_psf.argmax(), conv_psf.shape)
         cent_data = center_data(sep_data, (None, ) + psf_max_loc)
         # take rfft along spatial dimensions (get seperated OTFs)
-        # last ifftshift isn't performed along las axis, because it's the real
+        # last fftshift isn't performed along las axis, because it's the real
         # axis
-        self.cent_data_fft_sep = ifftshift(rfftn(fftshift(
+        self.cent_data_fft_sep = fftshift(rfftn(ifftshift(
             cent_data, axes=(1, 2, 3)), axes=(1, 2, 3)), axes=(1, 2)
         )
         self.avg_and_mask()
@@ -694,7 +694,7 @@ class PSF3DProcessor(object):
         # set dimensions
         header.d = (self.dkz * 1000, self.dkr * 1000, 0.0)
         bands = swapaxes(self.bands, 1, 2)
-        bands = rescale(fftshift(bands, axes=2))
+        bands = rescale(ifftshift(bands, axes=2))
         tosave = bands.astype(np.complex64)
 
         Mrc.save(tosave, output_filename, hdr=header, **kwargs)
@@ -1001,7 +1001,7 @@ def calc_radial_OTF(psf, krcutoff=None, show_OTF=False):
     # TODO: add this part
 
     # fft, switch to rfft
-    otf = ifftshift(fftn(fftshift(newpsf)))
+    otf = fftshift(fftn(ifftshift(newpsf)))
 
     if show_OTF:
         from dphplotting import mip
