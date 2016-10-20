@@ -1354,11 +1354,11 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
         sirecon_ouput += simrecon(**sim_kwargs)
     # read in processed data
     recon_split_data = np.array([
-        Mrc.Mrc(path).data[0]
+        Mrc.Mrc(path).data
         for path in sorted(glob.glob(
             dir_name + '/sub_image*_{}_proc.mrc'.format(sha))
         )
-    ])
+    ]).squeeze()
     # recombine data, remember the data density is doubled so padding is to
     if window_func is None:
         recon_split_data_combine = combine_img_with_padding(recon_split_data,
