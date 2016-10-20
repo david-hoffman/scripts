@@ -699,7 +699,7 @@ class PSF3DProcessor(object):
         header.NumWaves = 1
         # set dimensions
         header.d = (self.dkz * 1000, self.dkr * 1000, 0.0)
-        bands = swapaxes(self.bands, 1, 2)
+        bands = np.swapaxes(self.bands, 1, 2)
         bands = rescale(ifftshift(bands, axes=2))
         tosave = bands.astype(np.complex64)
 
@@ -950,7 +950,6 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
         else:
             # test validity
             if kw_type == 'path':
-                # assert os.path.exists(kw_value), '{} is an invalid path'.format(kw_value)
                 pass
             else:
                 assert isinstance(kw_value, kw_type), '{} is type {} and should have been type {}'.format(k, type(kw_value), repr(kw_type))
@@ -1193,7 +1192,7 @@ def linear_edge(pad):
     >>> np.allclose(edge + rev_edge, np.ones_like(edge))
     True
     '''
-    return np.arange(pad)/(pad-1)
+    return np.arange(pad) / (pad - 1)
 
 
 def edge_window(center_size, edge_size, window_func=cosine_edge):
@@ -1271,8 +1270,14 @@ def extend_and_window_tile(tile, pad_size, tile_num, num_tiles,
         xwin[-pad_size * 2:] = 1
     # generate the 2D window
     win_2d = ywin.reshape(-1, 1).dot(xwin.reshape(1, -1))
+    # reshape window so that it works for 3D and for time
+    # note that this still only tiles in 2D and not a full
+    # 3D tiling.
+    win_2d.shape = (1, ) * (tile.ndim - 2) + win_2d.shape
     # return the windowed padded tile
-    return np.pad(tile * win_2d, ((ybefore, yafter), (xbefore, xafter)),
+    padding = (((0, 0),) * (tile.ndim - 2) +
+               ((ybefore, yafter), (xbefore, xafter)))
+    return np.pad(tile * win_2d, padding,
                   mode='constant', constant_values=0)
 
 
@@ -1318,8 +1323,8 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     dir_name = os.path.join(local_drive, 'split_recon_' + sha)
     os.mkdir(dir_name)
     # save split data
-    for i, data in tqdm.tqdm(
-        enumerate(split_data), "Splitting and saving data", num_tiles, False):
+    for i, data in tqdm.tqdm(enumerate(split_data),
+                             "Splitting and saving data", num_tiles, False):
         # save subimages in sub folder, use sha as ID
         savepath = os.path.join(dir_name,
                                 'sub_image{:06d}_{}.mrc'.format(i, sha))
@@ -1334,28 +1339,35 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     i_re = re.compile('(?<=sub_image)\d+')
     # process data
     sirecon_ouput = []
-    for path in tqdm.tqdm(glob.iglob(dir_name + '/sub_image*_{}.mrc'.format(sha)), "Processing tiles", num_tiles, False):
+    for path in tqdm.tqdm(
+        glob.iglob(dir_name + '/sub_image*_{}.mrc'.format(sha)),
+        "Processing tiles", num_tiles, False
+    ):
         # update the kwargs to have the input file.
         sim_kwargs.update({
             'input_file': path,
             'output_file': path.replace('.mrc', '_proc.mrc')
-            })
+        })
         if bg_estimate:
             i = int(re.findall(i_re, path)[0])
             sim_kwargs['background'] = float(bgs[i])
         sirecon_ouput += simrecon(**sim_kwargs)
     # read in processed data
-    recon_split_data = np.array([Mrc.Mrc(path).data[0]
-                                 for path in sorted(glob.glob(dir_name +
-                                        '/sub_image*_{}_proc.mrc'.format(sha)))
-                                ])
+    recon_split_data = np.array([
+        Mrc.Mrc(path).data[0]
+        for path in sorted(glob.glob(
+            dir_name + '/sub_image*_{}_proc.mrc'.format(sha))
+        )
+    ])
     # recombine data, remember the data density is doubled so padding is to
     if window_func is None:
         recon_split_data_combine = combine_img_with_padding(recon_split_data,
                                                             padding * zoom)
     else:
         to_combine_data = None
-        for i, d in tqdm.tqdm(enumerate(recon_split_data), "Recombining", num_tiles, False):
+        for i, d in tqdm.tqdm(
+            enumerate(recon_split_data), "Recombining", num_tiles, False
+        ):
             current_tile = extend_and_window_tile(d, padding * zoom, i,
                                                   num_tiles,
                                                   window_func=window_func)
@@ -1366,7 +1378,7 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
         edge_pix = (padding // 2) * zoom
         slc = slice(edge_pix, -edge_pix, None)
         # cut them here.
-        recon_split_data_combine = to_combine_data[slc, slc].astype(np.float32)
+        recon_split_data_combine = to_combine_data[..., slc, slc].astype(np.float32)
         # make sure the new data is the right shape
         oldy, oldx = old_data.shape[-2:]
         newy, newx = recon_split_data_combine.shape[-2:]
@@ -1422,6 +1434,7 @@ def process_txt_output(txt_buffer):
         data.shape = (ny, nx, ndirs)
     # plot
     return my_angles, my_mags, my_amps, my_phases
+
 
 def plot_params(angles, mags, amps, phases):
     titles = ('Angles', 'Magnitudes', 'Amplitudes', 'Phase')
