@@ -21,7 +21,7 @@ from peaks.peakfinder import PeakFinder
 
 from dphutils import (slice_maker, scale_uint16, fft_pad,
                       nextpow2, radial_profile)
-from dphplotting import display_grid
+from dphplotting import display_grid, mip
 from pyOTF.phaseretrieval import *
 from pyOTF.utils import *
 try:
@@ -31,7 +31,8 @@ try:
     # Turn on the cache for optimum performance
     pyfftw.interfaces.cache.enable()
 except ImportError:
-    from numpy.fft import fftshift, ifftshift, fftn, ifftn, rfftn, fftfreq, rfftfreq
+    from numpy.fft import (fftshift, ifftshift, fftn, ifftn, rfftn, fftfreq,
+                           rfftfreq)
 from skimage.external import tifffile as tif
 
 
@@ -44,7 +45,6 @@ class PSFFinder(object):
         Parameters
         ----------
         stack : ndarray
-
 
         Kwargs
         ------
@@ -170,7 +170,8 @@ class PhaseRetriever(PSFFinder):
         return self.pr_result
 
 
-class SIMOTFMaker(PSFFinder):
+class PSF2DProcessor(object):
+    """An object for processing 2D PSFs and OTFs from 3D stacks"""
 
     def __init__(self, stack, na=0.85, pixsize=0.13,
                  det_wl=0.585, **kwargs):
@@ -183,29 +184,35 @@ class SIMOTFMaker(PSFFinder):
         pixsize : float
         det_wl : float
         """
-        psfwidth = det_wl / 4 / na / pixsize
-        super().__init__(stack, psfwidth, **kwargs)
+        # psfwidth = det_wl / 4 / na / pixsize
+        self.stack = stack
         self.na = na
         self.pixsize = pixsize
         self.det_wl = det_wl
 
-    def plot_window(self, blob_num, **kwargs):
+    def plot(self, **kwargs):
         """Plot all the things for this window"""
-        self.find_window(blob_num)
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
-        ax1.matshow(self.peakfinder.data[self.window])
+        fig, ax1 = plt.subplots(1, 1, figsize=(6, 6))
+        # show mip
+        mip(self.stack)
         self.gen_radialOTF(show_OTF=True, **kwargs)
-        ax2.semilogy(abs(self.radprof))
-        fig.tight_layout()
+        ax1.semilogy(abs(self.radprof))
+
+    def _preprocess_stack(self, minpadding=None):
+        """Remove background and fft pad data"""
+        img_raw = self.stack
+        img_raw = remove_bg(img_raw, 1.0)
+        nz, ny, nx = img_raw.shape
+        nr = max(ny, nx)
+        if minpadding is not None:
+            nr = nextpow2(max(nr, minpadding))
+        new_nz = nextpow2(nz)
+        img = fft_pad(img_raw, (new_nz, nr, nr), mode='constant')
+        return img
 
     def calc_infocus_psf(self, filter_kspace=True, filter_xspace=True):
-        '''
-        Calculate the infocus psf
-        '''
-        img_raw = self.stack[[Ellipsis] + self.window]
-        img_raw = remove_bg(img_raw, 1.0)
-        # pad image
-        psf = fft_pad(img_raw)
+        '''Calculate the infocus psf'''
+        psf = self._preprocess_stack()
         # recenter
         # TODO: add this part
         # fft
@@ -225,47 +232,24 @@ class SIMOTFMaker(PSFFinder):
         if filter_xspace:
             mask = r > 4 * (self.det_wl / 2 * self.na / self.pixsize)
             infocus_psf[mask] = 0
-        self.psf = infocus_psf
+        self.psf_2d = infocus_psf
 
-    def gen_radialOTF(self, lf_cutoff=0.1, width=3, **kwargs):
+    def gen_radialOTF(self, lf_cutoff=None, **kwargs):
         """Generate the Radially averaged OTF from the sample data."""
-        img_raw = self.stack[[Ellipsis] + self.window]
-        img_raw = remove_bg(img_raw, 1.0)
-        if img_raw.shape[-1] < 512 or img_raw.shape[-2] < 512:
-            img = fft_pad(img_raw, (nextpow2(img_raw.shape[0]), 512, 512))
-        else:
-            img = fft_pad(img_raw)
+        img = self._preprocess_stack(256)
         # pull the max x, y size
-        nx = max(img.shape[-1:-3:-1])
+        nx = max(img.shape[-2:])
         # calculate the um^-1/pix
         dkr = 1 / (nx * self.pixsize)
         # save dkr for later
         self.dkr = dkr
         # calculate the kspace cutoff, round up (that's what the 0.5 is for)
-        krcutoff = int(2 * self.na / (self.det_wl) / dkr + .5)
-        radprof = calc_radial_OTF(img, krcutoff, **kwargs)
-        if lf_cutoff is not None:
-            # if given a cutoff linearly fit the points around it to a line
-            # then interpolate the line back to the origin starting at the low
-            # frequency
-            # find the cutoff in terms of pixels
-            mid_num = int(lf_cutoff / dkr + .5)
-            # choose the low frequency
-            lf = mid_num - width
-            if lf > 0:
-                # if the low frequency is higher than the DC component then
-                # proceed with the fit, we definitely don't want to include
-                # the DC
-                hf = mid_num + width
-                m, b = np.polyfit(np.arange(lf, hf), radprof[lf:hf], 1)
-
-                radprof[:mid_num] = np.arange(0, mid_num) * m + b
-
-            else:
-                # set DC to mid_num to mid_num
-                radprof[:mid_num] = radprof[mid_num]
-            # TODO: add bit to remove average phase angle from profile.
-            radprof /= radprof.max()
+        diff_limit = 2 * self.na / (self.det_wl)
+        krcutoff = int(diff_limit / dkr + .5)
+        if lf_cutoff is None:
+            lf_cutoff = diff_limit * 0.025
+        lf_cutoff = int(lf_cutoff / dkr + .5)
+        radprof = calc_radial_OTF(img, krcutoff, lf_cutoff, **kwargs)
 
         self.radprof = radprof
 
@@ -291,20 +275,41 @@ class SIMOTFMaker(PSFFinder):
 
         Mrc.save(tosave, output_filename, hdr=header, **kwargs)
 
-    def save_PSF_mrc(self, output_filename):
-        '''
-        Object specific wrapper for general save_PSF_mrc
-        '''
 
-        # take the best blob and pad to at least 512
-        img_raw = self.best_blob_data
+class SIMOTF2D(PSFFinder):
 
-        if img_raw.shape[0] < 512:
-            img = fft_pad(img_raw, 512)
-        else:
-            img = fft_pad(img_raw)
+    def __init__(self, stack, na=0.85, pixsize=0.13,
+                 det_wl=0.585, **kwargs):
+        """Find PSFs and turn them into OTFs
 
-        save_PSF_mrc(img, output_filename, self.pixsize, self.det_wl)
+        Parameters
+        ----------
+        stack : ndarray
+        na : float
+        pixsize : float
+        det_wl : float
+        """
+        psfwidth = det_wl / 4 / na / pixsize
+        super().__init__(stack, psfwidth, **kwargs)
+        self.psfproc = PSF2DProcessor(None, na, pixsize, det_wl)
+
+    def plot_window(self, blob_num, **kwargs):
+        """Plot all the things for this window"""
+        win = self.find_window(blob_num)
+        self.psfproc.stack = self.stack[[Ellipsis] + win]
+        return self.psfproc.plot(**kwargs)
+
+    def calc_infocus_psf(self, **kwargs):
+        '''Calculate the infocus psf'''
+        self.psfproc.calc_infocus_psf(**kwargs)
+        self.psf = self.psfproc.psf
+
+    def gen_radialOTF(self, **kwargs):
+        """Generate the Radially averaged OTF from the sample data."""
+        self.psfproc.gen_radialOTF(**kwargs)
+
+    def save_radOTF_mrc(self, **kwargs):
+        self.psfproc.save_radOTF_mrc(**kwargs)
 
 
 def save_PSF_mrc(img, output_filename, pixsize=0.0975, det_wl=520):
@@ -983,7 +988,8 @@ def write_mrc(input_file):
     raise NotImplementedError
 
 
-def calc_radial_OTF(psf, krcutoff=None, show_OTF=False):
+def calc_radial_OTF(psf, krcutoff=None, lf_cutoff=None, width=3,
+                    show_OTF=False):
     '''
     Calculate radially averaged OTF given a PSF and a cutoff value.
 
@@ -995,6 +1001,13 @@ def calc_radial_OTF(psf, krcutoff=None, show_OTF=False):
         The psf from which to calculate the OTF
     krcutoff: int
         The diffraction limit in pixels.
+    lf_cutoff: int
+        The low frequency cutoff in pixels.
+    width : int
+        the half width of the linear fit window to minimize the DC
+        component
+    show_OTF : bool
+        plot the OTF for inspection
 
     Returns
     -------
@@ -1004,16 +1017,15 @@ def calc_radial_OTF(psf, krcutoff=None, show_OTF=False):
     # assumes background has already been removed from PSF
     # recenter
     # TODO: add this part
-
     # fft, switch to rfft
-    otf = fftshift(fftn(ifftshift(newpsf)))
+    otf = fftshift(fftn(ifftshift(psf)))
 
     if show_OTF:
-        from dphplotting import mip
+        from dphplotting import slice_plot
         from matplotlib.colors import LogNorm
         # this is still wrong, need to do the mean before summing
         # really we need a slice function.
-        mip(abs(otf), func=np.mean, norm=LogNorm())
+        slice_plot(abs(otf), norm=LogNorm())
 
     if otf.ndim > 2:
         # if we have a 3D OTF collapse it by summation along kz into a 2D OTF.
@@ -1022,18 +1034,32 @@ def calc_radial_OTF(psf, krcutoff=None, show_OTF=False):
     center = np.array(otf.shape) / 2
 
     radprof, _ = radial_profile(otf)[:int(center[0] + 1)]
-
-    radprof /= radprof.max()
-
     if krcutoff is not None:
         # calculate mean phase angle of data within diffraction limit
         temp = radprof[:krcutoff]
-        temp /= abs(temp)
-        phi = np.angle(mean(temp))
+        temp = temp / abs(temp)
+        phi = np.angle(temp.mean())
         # remove mean phase angle
         radprof *= np.exp(-1j * phi)
         # set everything beyond the diffraction limit to 0
         radprof[krcutoff:] = 0
+    if lf_cutoff:
+        # if given a cutoff linearly fit the points around it to a line
+        # then interpolate the line back to the origin starting at the low
+        # frequency
+        # choose the low frequency
+        lf = lf_cutoff - width
+        if lf > 0:
+            # if the low frequency is higher than the DC component then
+            # proceed with the fit, we definitely don't want to include
+            # the DC
+            hf = lf_cutoff + width
+            m, b = np.polyfit(np.arange(lf, hf), radprof[lf:hf], 1)
+            radprof[:lf_cutoff] = np.arange(0, lf_cutoff) * m + b
+        else:
+            # set DC to mid_num to mid_num
+            radprof[:lf_cutoff] = radprof[lf_cutoff]
+    radprof /= abs(radprof).max()
     # return
     return radprof
 
