@@ -20,7 +20,7 @@ from collections import OrderedDict, Sequence
 from peaks.peakfinder import PeakFinder
 
 from dphutils import (slice_maker, scale_uint16, fft_pad,
-                      nextpow2, radial_profile)
+                      radial_profile)
 from dphplotting import display_grid, mip
 from pyOTF.phaseretrieval import *
 from pyOTF.utils import *
@@ -85,7 +85,7 @@ class PSFFinder(object):
         new_blobs_df = blobs_df[
             blobs_df.sigma_x < max_s
         ].sort_values(
-            ['SNR', 'sigma_x'], ascending=[False, True]
+            ['amp','SNR', 'sigma_x'], ascending=[False, False, True]
         ).reset_index(drop=True)
         # set the internal state to the selected blobs
         my_PF.blobs = new_blobs_df[
@@ -198,15 +198,12 @@ class PSF2DProcessor(object):
         self.gen_radialOTF(show_OTF=True, **kwargs)
         ax1.semilogy(abs(self.radprof))
 
-    def _preprocess_stack(self, minpadding=None):
+    def _preprocess_stack(self):
         """Remove background and fft pad data"""
         img_raw = self.stack
         img_raw = remove_bg(img_raw, 1.0)
         nz, ny, nx = img_raw.shape
         nr = max(ny, nx)
-        if minpadding is not None:
-            nr = nextpow2(max(nr, minpadding))
-        new_nz = nextpow2(nz)
         img = fft_pad(img_raw, (new_nz, nr, nr), mode='constant')
         return img
 

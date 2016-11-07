@@ -4,6 +4,8 @@
 import os
 import glob
 import textwrap
+import Mrc
+import warnings
 import numpy as np
 import matplotlib as mpl
 import multiprocessing as mp
@@ -37,16 +39,32 @@ def load_data(dirname, key):
     '''
 
     def better_imread(fname):
-        '''
-        Small utility to side step OME parsing error.
-        '''
-        with tif.TiffFile(fname) as mytif:
-            return np.squeeze(np.array([page.asarray()
-                                        for page in mytif.pages]))
+        '''Small utility to side step OME parsing error.'''
+        root, ext = os.path.splitext(fname)
+        if not ext:
+            warnings.warn("File {} not working".format(fname))
+            return None
+        if ext == ".tif":
+            with tif.TiffFile(fname) as mytif:
+                data = np.squeeze(np.array([page.asarray()
+                                            for page in mytif.pages]))
+        elif ext == ".mrc":
+            data = np.squeeze(np.array(Mrc.Mrc(fname).data))
+        else:
+            warnings.warn("extension {} is not supported at this time".format(ext))
+            return None
+        if data.ndim == 3:
+            # mip along z
+            data = data.max(0)
+        elif data.ndim > 3 or data.ndim < 2:
+            warnings.warn("Data should have 3 or 2 dimensions, not {}".format(data.ndim))
+            return None
+        # make sure data is positive
+        data[data < 0] = 0
+        return data
 
     return {fname: better_imread(fname)
-            for fname in glob.iglob(dirname + os.path.sep + key)
-            if '.tif' in fname}
+            for fname in glob.iglob(dirname + os.path.sep + key)}
 
 
 def clean_dirname(dirname, figsize):
@@ -102,8 +120,7 @@ def gen_thumbs(dirname, key='/*/*decon.tif', where='host', level=2, figsize=6,
 
 
 def gen_all_thumbs(home=".", path_key='SIM', **kwargs):
-    '''
-    '''
+    '''Generate all thumbs'''
     with mp.Pool() as pool:
         # spread jobs over processors.
         results = [pool.apply_async(
@@ -157,6 +174,8 @@ if __name__ == '__main__':
         click.echo("+" * 25)
         for k, v in sorted(default_kwds.items()):
             click.echo("{: >10} ---> {}".format(k, v))
+        for path in find_paths(home=home, key=path_key):
+            click.echo(path)
         gen_all_thumbs(**default_kwds)
 
     update_kwds()
