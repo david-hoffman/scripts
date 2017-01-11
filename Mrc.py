@@ -1107,8 +1107,8 @@ def initHdrArrayFrom(hdrDest, hdrSrc): #, mode, nxOrShape, ny=None, nz=None):
     hdrDest.nblank = hdrSrc.nblank   #20090402
     hdrDest.ntst = hdrSrc.ntst       #20090402
     hdrDest.extra = hdrSrc.extra      #20090402
-    hdrDest.NumIntegers = 0 #hdrSrc.NumIntegers
-    hdrDest.NumFloats =   0 #hdrSrc.NumFloats
+    hdrDest.NumIntegers = hdrSrc.NumIntegers
+    hdrDest.NumFloats =   hdrSrc.NumFloats
     hdrDest.sub =         hdrSrc.sub
     hdrDest.zfac =        hdrSrc.zfac
     hdrDest.mm2 = hdrSrc.mm2
