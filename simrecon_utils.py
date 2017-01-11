@@ -725,7 +725,7 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
     -------
     ndirs: int (default is 3)
         number of directions in data
-    nphases: int (default is 5)
+    nphases: int (default is 3)
         number of phases in data
     2lenses: bool
         data acquired with 2 opposing objectives
@@ -753,18 +753,19 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
     fitonephase: bool
         in 2D NLSIM for orders > 1, modamp's phase will be order 1 phase
         multiplied by order; default is using fitted phases for all orders
-    noapodizeout: bool
-        do not want to apodize the output data
-    gammaApo: float
+    noapodizeout: bool (False)
+        do not want to apodize the output data, the default is to use a cosine
+        apodization function.
+    gammaApo: float (None)
         apodize the output data with a power function
-    preciseapo: bool
+    preciseapo: bool (False)
         Apply precise apo or not
-    zoomfact: float
+    zoomfact: float (4)
         factor by which to subdivide pixels laterally
-    zzoom: float
+    zzoom: float (1)
         factor by which to subdivide pixels axially
-    zpadto: int
-        how many total sections after zero padding
+    zpadto: int (0)
+        how many total sections after zero padding (this hasn't been implemented properly)
     explodefact: float
         factor by which to exaggerate the order shifts for display
     nofilteroverlaps: bool (default True)
@@ -772,8 +773,8 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
         (no filtering the overlapped regions)
     nosuppress: bool
         do not want to suppress singularity at OTF origins
-    suppressR: float
-        the radius of range
+    suppressR: float (default is 10)
+        the radius of suppression
     dampenOrder0: bool
         dampen order 0 in filterbands
     noOrder0: bool
@@ -812,15 +813,15 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
     nordersout: int
         the number of orders to use in reconstruction. Use if different from
         (n_phases+1)/2
-    angle0: float
+    angle0: float (1.57193)
         the starting angle (in radians) of the patterns
-    negDangle: bool
+    negDangle: bool (False)
         use negative angle step
-    ls: float
+    ls: float (0.177)
         the illumination pattern's line spacing (in microns)
-    na: float
+    na: float (1.36)
         the (effective) na of the objective
-    nimm: float
+    nimm: float (1.515)
         the index of refraction of the immersion liquid
     saveprefiltered: path
         save separated bands into file
@@ -1313,9 +1314,36 @@ def combine_img_with_padding(img_stack, pad_width):
     return combine_img(img_stack[..., half_pad:-half_pad, half_pad:-half_pad])
 
 
+def combine_img_with_padding_window(recon_split_data, padding,
+                                    window_func=cosine_edge, zoom=1):
+    """Combine a tile stack when there's padding and a window involved
+
+
+    NOTE: The smarter way to do this would be to figure our the coordinates
+    of the tile and then only do operations on those coordinates, instead
+    of the whole dataset. Right now we do n x m operations where n is the
+    number of tiles and m is the size of the whole data. Where we could
+    be doing n x m' operations where m' is the size of the tile."""
+    to_combine_data = None
+    num_tiles = recon_split_data.shape[0]
+    for i, d in tqdm.tqdm(
+        enumerate(recon_split_data), "Recombining", num_tiles, False
+    ):
+        current_tile = extend_and_window_tile(d, padding * zoom, i,
+                                              num_tiles,
+                                              window_func=window_func)
+        if to_combine_data is None:
+            to_combine_data = np.zeros_like(current_tile)
+        to_combine_data += current_tile
+    # we need to get rid of the reflected bits
+    edge_pix = (padding // 2) * zoom
+    slc = slice(edge_pix, -edge_pix, None)
+    # cut them here.
+    return to_combine_data[..., slc, slc]
+
+
 def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
-                            extension='_split', bg_estimate=None,
-                            window_func=cosine_edge):
+                            bg_estimate=None, window_func=cosine_edge):
     '''
     Method that splits then processes and then recombines images
 
@@ -1323,6 +1351,8 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     -------
     total_save_path, sirecon_ouput
     '''
+    # save output name for later
+    outname = sim_kwargs["output_file"]
     # make sure zoomfact is integer
     zoom = sim_kwargs["zoomfact"]
     assert zoom.is_integer(), "Zoomfact is not an interger, Abort!"
@@ -1382,35 +1412,26 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
             dir_name + '/sub_image*_{}_proc.mrc'.format(sha))
         )
     ]).squeeze()
-    # recombine data, remember the data density is doubled so padding is to
+    # recombine data, remember the data density is doubled so padding is too
     if window_func is None:
         recon_split_data_combine = combine_img_with_padding(recon_split_data,
                                                             padding * zoom)
     else:
-        to_combine_data = None
-        for i, d in tqdm.tqdm(
-            enumerate(recon_split_data), "Recombining", num_tiles, False
-        ):
-            current_tile = extend_and_window_tile(d, padding * zoom, i,
-                                                  num_tiles,
-                                                  window_func=window_func)
-            if to_combine_data is None:
-                to_combine_data = np.zeros_like(current_tile)
-            to_combine_data += current_tile
-        # still need to cut off the edges
-        edge_pix = (padding // 2) * zoom
-        slc = slice(edge_pix, -edge_pix, None)
-        # cut them here.
-        recon_split_data_combine = to_combine_data[..., slc, slc].astype(np.float32)
+        to_combine_data = combine_img_with_padding_window(recon_split_data,
+                                                          padding,
+                                                          window_func, zoom)
+        recon_split_data_combine = to_combine_data.astype(np.float32)
         # make sure the new data is the right shape
         oldy, oldx = old_data.shape[-2:]
         newy, newx = recon_split_data_combine.shape[-2:]
         assert newx == oldx * zoom, "X-dim: {} != {}".format(newx, oldx * zoom)
         assert newy == oldy * zoom, "Y-dim: {} != {}".format(newy, oldy * zoom)
     # save data
+    # path is the last tile we read in, it has all the relevant metadata
     temp_mrc = Mrc.Mrc(path.replace('.mrc', '_proc.mrc'))
-    total_save_path = fullpath.replace(
-        '.mrc', '_proc{}{}.mrc'.format(tile_size, extension))
+    extension = "_tile{}_pad{}.mrc".format(tile_size, padding)
+    total_save_path = outname.replace(
+        '.mrc', extension)
     Mrc.save(recon_split_data_combine,
              total_save_path,
              hdr=temp_mrc.hdr,
