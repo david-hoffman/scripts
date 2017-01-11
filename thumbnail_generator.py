@@ -32,39 +32,38 @@ def find_paths(home='.', key='SIM'):
             yield dirpath
 
 
+def better_imread(fname):
+    '''Small utility to side step OME parsing error.'''
+    root, ext = os.path.splitext(fname)
+    if not ext:
+        warnings.warn("File {} not working".format(fname))
+        return None
+    if ext == ".tif":
+        with tif.TiffFile(fname) as mytif:
+            data = np.squeeze(np.array([page.asarray()
+                                        for page in mytif.pages]))
+    elif ext == ".mrc":
+        data = np.squeeze(np.array(Mrc.Mrc(fname).data))
+    else:
+        warnings.warn("extension {} is not supported at this time".format(ext))
+        return None
+    if data.ndim == 3:
+        # mip along z
+        data = data.max(0)
+    elif data.ndim > 3 or data.ndim < 2:
+        warnings.warn("Data should have 3 or 2 dimensions, not {}".format(data.ndim))
+        return None
+    # make sure data is positive
+    data[data < 0] = 0
+    return data
+
+
 def load_data(dirname, key):
-    '''
-    Function to load all specified data matching glob into a dict
+    '''Function to load all specified data matching glob into a dict
     and return the dict
     '''
-
-    def better_imread(fname):
-        '''Small utility to side step OME parsing error.'''
-        root, ext = os.path.splitext(fname)
-        if not ext:
-            warnings.warn("File {} not working".format(fname))
-            return None
-        if ext == ".tif":
-            with tif.TiffFile(fname) as mytif:
-                data = np.squeeze(np.array([page.asarray()
-                                            for page in mytif.pages]))
-        elif ext == ".mrc":
-            data = np.squeeze(np.array(Mrc.Mrc(fname).data))
-        else:
-            warnings.warn("extension {} is not supported at this time".format(ext))
-            return None
-        if data.ndim == 3:
-            # mip along z
-            data = data.max(0)
-        elif data.ndim > 3 or data.ndim < 2:
-            warnings.warn("Data should have 3 or 2 dimensions, not {}".format(data.ndim))
-            return None
-        # make sure data is positive
-        data[data < 0] = 0
-        return data
-
     return {fname: better_imread(fname)
-            for fname in glob.iglob(dirname + os.path.sep + key)}
+            for fname in glob.iglob(dirname + os.path.sep + key, recursive=True)}
 
 
 def clean_dirname(dirname, figsize):
@@ -90,6 +89,7 @@ def gen_thumbs(dirname, key='/*/*decon.tif', where='host', level=2, figsize=6,
     Main function to generate and save thumbnail pngs
     '''
     # load data
+    print('Gathering data for', dirname, key, 'on', os.getpid(), '...')
     data = load_data(dirname, key)
     if data:
         # can clean the dirnames here
@@ -111,9 +111,11 @@ def gen_thumbs(dirname, key='/*/*decon.tif', where='host', level=2, figsize=6,
         # make the layout 'tight'
         fig.tight_layout()
         # save the figure
-        print('Saving', save_name, 'on', os.getpid(), '...')
+        print('Saving', save_name, '...')
         fig.savefig(save_name, bbox_inches='tight')
         print('finished saving', save_name)
+    else:
+        print("No data in", dirname + key)
     # mark data for gc
     del data
     return dirname + os.path.sep + key
