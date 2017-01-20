@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 # need subprocess to run commands
 import subprocess
 import hashlib
-import shutil
+import tempfile
 # import our ability to read and write MRC files
 import Mrc
 
@@ -1370,79 +1370,75 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     # estimate background
     if bg_estimate:
         bgs = {}
-    # find local drive
-    local_drive = os.path.expanduser('~')
-    # make dir
-    dir_name = os.path.join(local_drive, 'split_recon_' + sha)
-    os.mkdir(dir_name)
-    # save split data
-    for i, data in tqdm.tqdm(enumerate(split_data),
-                             "Splitting and saving data", num_tiles, False):
-        # save subimages in sub folder, use sha as ID
-        savepath = os.path.join(dir_name,
-                                'sub_image{:06d}_{}.mrc'.format(i, sha))
-        Mrc.save(data, savepath, hdr=oldmrc.hdr, ifExists='overwrite')
-        if bg_estimate == 'min':
-            bgs[i] = data.min()
-        elif bg_estimate == 'median':
-            bgs[i] = np.median(data)
-        elif bg_estimate == 'mode':
-            bgs[i] = np.argmax(np.bincount(data.ravel()))
-    # set up re
-    i_re = re.compile('(?<=sub_image)\d+')
-    # process data
-    sirecon_ouput = []
-    for path in tqdm.tqdm(
-        glob.iglob(dir_name + '/sub_image*_{}.mrc'.format(sha)),
-        "Processing tiles", num_tiles, False
-    ):
-        # update the kwargs to have the input file.
-        sim_kwargs.update({
-            'input_file': path,
-            'output_file': path.replace('.mrc', '_proc.mrc')
-        })
-        if bg_estimate:
-            i = int(re.findall(i_re, path)[0])
-            sim_kwargs['background'] = float(bgs[i])
-        sirecon_ouput += simrecon(**sim_kwargs)
-    # read in processed data
-    recon_split_data = np.array([
-        Mrc.Mrc(path).data
-        for path in sorted(glob.glob(
-            dir_name + '/sub_image*_{}_proc.mrc'.format(sha))
-        )
-    ]).squeeze()
-    # recombine data, remember the data density is doubled so padding is too
-    if window_func is None:
-        recon_split_data_combine = combine_img_with_padding(recon_split_data,
-                                                            padding * zoom)
-    else:
-        to_combine_data = combine_img_with_padding_window(recon_split_data,
-                                                          padding,
-                                                          window_func, zoom)
-        recon_split_data_combine = to_combine_data.astype(np.float32)
-        # make sure the new data is the right shape
-        oldy, oldx = old_data.shape[-2:]
-        newy, newx = recon_split_data_combine.shape[-2:]
-        assert newx == oldx * zoom, "X-dim: {} != {}".format(newx, oldx * zoom)
-        assert newy == oldy * zoom, "Y-dim: {} != {}".format(newy, oldy * zoom)
-    # save data
-    # path is the last tile we read in, it has all the relevant metadata
-    temp_mrc = Mrc.Mrc(path.replace('.mrc', '_proc.mrc'))
-    extension = "_tile{}_pad{}.mrc".format(tile_size, padding)
-    total_save_path = outname.replace(
-        '.mrc', extension)
-    Mrc.save(recon_split_data_combine,
-             total_save_path,
-             hdr=temp_mrc.hdr,
-             ifExists='overwrite')
-    # clean up
-    oldmrc.close()
-    del oldmrc
-    temp_mrc.close()
-    del temp_mrc
-    # kill folder
-    shutil.rmtree(dir_name)
+    # make temp directory to work in
+    with tempfile.TemporaryDirectory() as dir_name:
+        # save split data
+        for i, data in tqdm.tqdm(
+            enumerate(split_data), "Splitting and saving data", num_tiles, False):
+            # save subimages in sub folder, use sha as ID
+            savepath = os.path.join(dir_name,
+                                    'sub_image{:06d}_{}.mrc'.format(i, sha))
+            Mrc.save(data, savepath, hdr=oldmrc.hdr, ifExists='overwrite')
+            if bg_estimate == 'min':
+                bgs[i] = data.min()
+            elif bg_estimate == 'median':
+                bgs[i] = np.median(data)
+            elif bg_estimate == 'mode':
+                bgs[i] = np.argmax(np.bincount(data.ravel()))
+        # set up re
+        i_re = re.compile('(?<=sub_image)\d+')
+        # process data
+        sirecon_ouput = []
+        for path in tqdm.tqdm(
+            glob.iglob(dir_name + '/sub_image*_{}.mrc'.format(sha)),
+            "Processing tiles", num_tiles, False
+        ):
+            # update the kwargs to have the input file.
+            sim_kwargs.update({
+                'input_file': path,
+                'output_file': path.replace('.mrc', '_proc.mrc')
+            })
+            if bg_estimate:
+                i = int(re.findall(i_re, path)[0])
+                sim_kwargs['background'] = float(bgs[i])
+            sirecon_ouput += simrecon(**sim_kwargs)
+        # read in processed data
+        recon_split_data = np.array([
+            Mrc.Mrc(path).data
+            for path in sorted(glob.glob(
+                dir_name + '/sub_image*_{}_proc.mrc'.format(sha))
+            )
+        ]).squeeze()
+        # recombine data, remember the data density is doubled so padding is
+        # too
+        if window_func is None:
+            recon_split_data_combine = combine_img_with_padding(
+                recon_split_data, padding * zoom)
+        else:
+            to_combine_data = combine_img_with_padding_window(
+                recon_split_data, padding, window_func, zoom)
+            recon_split_data_combine = to_combine_data.astype(np.float32)
+            # make sure the new data is the right shape
+            oldy, oldx = old_data.shape[-2:]
+            newy, newx = recon_split_data_combine.shape[-2:]
+            assert newx == oldx * zoom, "X-dim: {} != {}".format(newx, oldx * zoom)
+            assert newy == oldy * zoom, "Y-dim: {} != {}".format(newy, oldy * zoom)
+        # save data
+        # path is the last tile we read in, it has all the relevant metadata
+        temp_mrc = Mrc.Mrc(path.replace('.mrc', '_proc.mrc'))
+        extension = "_tile{}_pad{}.mrc".format(tile_size, padding)
+        total_save_path = outname.replace(
+            '.mrc', extension)
+        Mrc.save(recon_split_data_combine,
+                 total_save_path,
+                 hdr=temp_mrc.hdr,
+                 ifExists='overwrite')
+        # clean up
+        oldmrc.close()
+        del oldmrc
+        temp_mrc.close()
+        del temp_mrc
+    # directory is killed automatically.
 
     return total_save_path, sirecon_ouput
 
