@@ -1,6 +1,11 @@
-'''
-SIMRecon Utility Functions
-'''
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# simrecon_utils.py
+"""
+Some utilities for SIM reconstruction.
+
+Copyright (c) 2016, David Hoffman
+"""
 # import some os functionality so that we can be platform independent
 import os
 import glob
