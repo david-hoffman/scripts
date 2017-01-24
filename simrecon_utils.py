@@ -1280,11 +1280,6 @@ def extend_and_window_tile(tile, pad_size, tile_num, num_tiles,
     yn, xn = tile_num % ytot, tile_num // ytot
     # calculate the unpadded size of the tile (original tile size)
     to_pad = (tile.shape[-1] - pad_size)
-    # calculate the before and after padding for each direction
-    ybefore = yn * to_pad
-    yafter = (ytot - yn - 1) * to_pad
-    xbefore = xn * to_pad
-    xafter = (xtot - xn - 1) * to_pad
     # make y window and x window
     ywin = edge_window(to_pad - pad_size, pad_size, window_func=window_func)
     xwin = edge_window(to_pad - pad_size, pad_size, window_func=window_func)
@@ -1304,10 +1299,28 @@ def extend_and_window_tile(tile, pad_size, tile_num, num_tiles,
     # 3D tiling.
     win_2d.shape = (1, ) * (tile.ndim - 2) + win_2d.shape
     # return the windowed padded tile
-    padding = (((0, 0),) * (tile.ndim - 2) +
-               ((ybefore, yafter), (xbefore, xafter)))
-    return np.pad(tile * win_2d, padding,
-                  mode='constant', constant_values=0)
+    # padding = (((0, 0),) * (tile.ndim - 2) +
+    #            ((ybefore, yafter), (xbefore, xafter)))
+    # print(padding)
+    # return np.pad(tile * win_2d, padding,
+    #               mode='constant', constant_values=0)
+
+    # calculate the before and after padding for each direction
+    ybefore = yn * to_pad
+    yafter = (ytot - yn - 1) * to_pad
+    xbefore = xn * to_pad
+    xafter = (xtot - xn - 1) * to_pad
+    if xafter == 0:
+        xslice = slice(xbefore, None)
+    else:
+        xslice = slice(xbefore, -xafter)
+    # now y
+    if yafter == 0:
+        yslice = slice(ybefore, None)
+    else:
+        yslice = slice(ybefore, -yafter)
+    slices = [Ellipsis, yslice, xslice]
+    return tile * win_2d, slices
 
 
 def combine_img_with_padding(img_stack, pad_width):
@@ -1321,25 +1334,33 @@ def combine_img_with_padding(img_stack, pad_width):
 
 def combine_img_with_padding_window(recon_split_data, padding,
                                     window_func=cosine_edge, zoom=1):
-    """Combine a tile stack when there's padding and a window involved
-
-
-    NOTE: The smarter way to do this would be to figure our the coordinates
-    of the tile and then only do operations on those coordinates, instead
-    of the whole dataset. Right now we do n x m operations where n is the
-    number of tiles and m is the size of the whole data. Where we could
-    be doing n x m' operations where m' is the size of the tile."""
-    to_combine_data = None
+    """Combine a tile stack when there's padding and a window involved"""
+    # get number of tiles
     num_tiles = recon_split_data.shape[0]
+    # figure out the new data size from inputs
+    # get unpadded yx size of data
+    newdata_shape = (np.array(recon_split_data.shape[-2:]) - padding * zoom)
+    # find number of tiles per side
+    newdata_shape *= int(np.sqrt(num_tiles))
+    # then increasee by padding and potential zoom factor
+    newdata_shape += padding * zoom
+    if recon_split_data.ndim == 4:
+        # 3D data
+        newdata_shape = recon_split_data.shape[1:2] + tuple(newdata_shape)
+    elif recon_split_data.ndim == 3:
+        # 2D data, don't do anything.
+        pass
+    else:
+        raise RuntimeError(
+            "Unexpected data shape = {}".format(recon_split_data.shape))
+    to_combine_data = np.zeros(newdata_shape, dtype=recon_split_data.dtype)
     for i, d in tqdm.tqdm(
         enumerate(recon_split_data), "Recombining", num_tiles, False
     ):
-        current_tile = extend_and_window_tile(d, padding * zoom, i,
-                                              num_tiles,
-                                              window_func=window_func)
-        if to_combine_data is None:
-            to_combine_data = np.zeros_like(current_tile)
-        to_combine_data += current_tile
+        current_tile, slices = extend_and_window_tile(d, padding * zoom, i,
+                                                      num_tiles,
+                                                      window_func=window_func)
+        to_combine_data[slices] += current_tile
     # we need to get rid of the reflected bits
     edge_pix = (padding // 2) * zoom
     slc = slice(edge_pix, -edge_pix, None)
