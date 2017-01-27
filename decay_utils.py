@@ -109,35 +109,92 @@ def bleach_plot(k, v, bg=100.0):
     return fig, axs
 
 
-def bleach_plot2(k, v, bg=100):
+def bleach_plot2(k, v, bg=100.0, num_tiles=16, gamma=0.5, dt=1):
+    """Plot bleaching of image timeseries
+
+    Parameters
+    ----------
+    k : str
+        Title string
+    v : ndarray (t, y, x)
+        Image stack (x must y)
+    bg : float
+        Background counts
+    num_tiles : int
+        Number of tiles per image side
+    """
+    nt, ny, nx = v.shape
+    assert ny == nx, "data isn't square"
     # make figure
     fig, axs = plt.subplots(1, 3, figsize=(9, 3))
     (ax, ax_k, ax_i) = axs
-    my_shape = v.shape
     fig.suptitle(k, y=1.05)
     # split the image
-    img_split = split_img(v, my_shape[-1] // 16)
+    img_split = split_img(v, nx // num_tiles)
     # sum kinetics, convert to float
+    bg = np.asarray(bg)
+    bg.shape = (-1, 1, 1)
     kinetics = (img_split * 1.0 - bg).sum((2, 3))
+    # anything that's negative mask with an nan
     kinetics[kinetics < 0] = np.nan
+    # normalize all the kinetics with the max one
     norm_kinetics = kinetics / np.max(kinetics[:, np.newaxis], -1)
     kin_img = np.ones_like(img_split)[:, 0, ...] * norm_kinetics[:, -1, np.newaxis, np.newaxis]
+    ### start plotting
     # plot kinetics, color by amount of bleaching and set alpha to initial intensity
     for trace, cpoint in zip(norm_kinetics, scale(norm_kinetics[:, -1])):
+        # make sure the point is not an nan
         if np.isfinite(cpoint):
-            ax.plot(trace, c=plt.get_cmap("spring")(cpoint))
-    # start plotting
+            ax.loglog(np.arange(len(trace)) * dt, trace, c=plt.get_cmap("spring")(cpoint))
+    # label stuff
     ax.set_title("Bleaching Kinetics")
-    ax.set_xlabel("Frame #")
+    ax.set_xlabel("Time (s)")
     ax.set_ylabel("Relative Intensity (a.u.)")
     ax.tick_params()
-    ax_k.matshow(v.max(0), cmap=greys_alpha_cm, norm=LogNorm(), zorder=1)
+    # calculate the max image
+    v_max = v.max(0)
+    # plot color coded kinetics
     ax_k.matshow(combine_img(kin_img), cmap="spring", zorder=0)
-    ax_i.matshow(adjust_gamma(v.max(0), 0.25), cmap="Greys_r")
+    # plot image with alpha over it
+    ax_k.matshow(v_max, cmap=greys_alpha_cm, norm=LogNorm(), zorder=1)
+    # plot raw image with gamma adjustment for reference
+    ax_i.matshow(adjust_gamma(v_max, gamma), cmap="Greys_r")
+    # remove grids
     for ax in (ax_i, ax_k):
         ax.grid("off")
         ax.axis("off")
+    # set titles
     ax_i.set_title("Image")
     ax_k.set_title("Bleaching Map")
     fig.tight_layout()
     return fig, axs
+
+def gen_wavelength(center_wl, start_p=0, end_p=2048, center_p=1024, pix_size=0.0065, grating_pitch=300.0):
+    """Generate a wavelength axis for spectroscopic data
+
+    Parameters
+    ----------
+    center_wl : float
+        Center wavelength as recorded by LabVIEW
+    start_p : int
+        first pixel
+    end_p : int
+        last pixel
+    center_p : int
+        center pixel
+    pix_size : float
+        pixel size in microns
+    grating_pitch : float
+        grooves per mm of the grating
+    offset : float
+
+    Returns
+    -------
+    wl : ndarray
+        Wavelength axis in nm
+    """
+    dispersion_1200 = 1.6
+    nm_per_mm = dispersion_1200 * 1200 / grating_pitch
+    nm_per_pixel = nm_per_mm * pix_size
+    pix = np.arange(start_p, end_p) - center_p
+    return pix * nm_per_pixel + center_wl
