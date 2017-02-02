@@ -204,3 +204,23 @@ def fast_hist3d(sample, bins, myrange=None, weights=None):
     else:
         hist = jit_hist3d(*Ncount, shape=shape)
     return hist, edges
+
+
+class QuickPALM():
+    pass
+    """
+    # This class will be designed to use PeakFinder and dask delayed to do a quickpalm analysis
+
+    def pf_func(data):
+    ...:     pf = PeakFinder(data, 1.3, "mode")
+    ...:     pf.thresh=10
+    ...:     pf.find_blobs()
+    ...:     return pf.fit_blobs(8, quiet=True)
+
+    Probably better to use explicit multiprocessing with Pool and apply_async
+    than use dask, but using dask might allow for easier transfer to distributed
+    computing
+    
+    pfs = dask.delayed([dask.delayed(pf_func)(x) for x in data])
+    junk = pfs.compute(get=dask.multiprocessing.get, num_workers=48)
+    """
