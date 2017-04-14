@@ -89,22 +89,22 @@ def gen_thumbs(dirname, key='/*/*decon.tif', where='host', level=2, figsize=6,
     Main function to generate and save thumbnail pngs
     '''
     # load data
+    # can clean the dirnames here
+    foldername = os.path.abspath(dirname).split(os.path.sep)[-level]
+    if where == 'host':
+        save_name = 'Thumbs ' + foldername + '.png'
+    elif where == 'in folder':
+        save_name = os.path.abspath(
+            os.path.join(dirname, 'Thumbs ' + foldername + '.png'))
+    else:
+        save_name = os.path.abspath(
+            os.path.join(where, 'Thumbs ' + foldername + '.png'))
+    if not redo and os.path.exists(save_name):
+        print(save_name, "already exists, skipping")
+        return dirname + os.path.sep + key
     print('Gathering data for', dirname, key, 'on', os.getpid(), '...')
     data = load_data(dirname, key)
     if data:
-        # can clean the dirnames here
-        foldername = os.path.abspath(dirname).split(os.path.sep)[-level]
-        if where == 'host':
-            save_name = 'Thumbs ' + foldername + '.png'
-        elif where == 'in folder':
-            save_name = os.path.abspath(
-                os.path.join(dirname, 'Thumbs ' + foldername + '.png'))
-        else:
-            save_name = os.path.abspath(
-                os.path.join(where, 'Thumbs ' + foldername + '.png'))
-        if not redo and os.path.exists(save_name):
-            print(save_name, "already exists, skipping")
-            return dirname + os.path.sep + key
         data = {clean_dirname(k, figsize): adjust_gamma(abs(v), gamma)
                 for k, v in data.items()}
         fig, ax = display_grid(data, figsize=figsize, **kwargs)
