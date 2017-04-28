@@ -1354,7 +1354,7 @@ def combine_img_with_padding_window(recon_split_data, padding,
         raise RuntimeError(
             "Unexpected data shape = {}".format(recon_split_data.shape))
     to_combine_data = np.zeros(newdata_shape, dtype=recon_split_data.dtype)
-    for i, d in tqdm.tqdm(
+    for i, d in tqdm.tqdm_notebook(
         enumerate(recon_split_data), "Recombining", num_tiles, False
     ):
         current_tile, slices = extend_and_window_tile(d, padding * zoom, i,
@@ -1399,7 +1399,7 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     # make temp directory to work in
     with tempfile.TemporaryDirectory() as dir_name:
         # save split data
-        for i, data in tqdm.tqdm(
+        for i, data in tqdm.tqdm_notebook(
             enumerate(split_data), "Splitting and saving data", num_tiles, False):
             # save subimages in sub folder, use sha as ID
             savepath = os.path.join(dir_name,
@@ -1415,7 +1415,7 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
         i_re = re.compile('(?<=sub_image)\d+')
         # process data
         sirecon_ouput = []
-        for path in tqdm.tqdm(
+        for path in tqdm.tqdm_notebook(
             glob.iglob(dir_name + '/sub_image*_{}.mrc'.format(sha)),
             "Processing tiles", num_tiles, False
         ):
