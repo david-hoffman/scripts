@@ -976,9 +976,15 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
                     exc_list.append('-' + k)
 
     # save the output
-    return_code = subprocess.check_output(exc_list)
-
-    return return_code.decode('utf-8').split('\n')
+    return_code = subprocess.run(
+        exc_list,
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    if return_code.stderr:
+        raise RuntimeError(return_code.stderr.decode())
+    return return_code.stdout.decode('utf-8').split('\n')
 
 def formatter(value):
     if isinstance(value, float):
