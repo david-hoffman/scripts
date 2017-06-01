@@ -8,8 +8,19 @@ Copyright (c) 2016, David Hoffman
 """
 
 import numpy as np
+import pandas as pd
+from scipy.io import readsav
 from numpy.core import atleast_1d, atleast_2d
 from numba import njit
+
+
+def peakselector_df(path, verbose=False):
+    """Read a peakselector file into a pandas dataframe"""
+    print("Reading {} into memory ... ".format(path))
+    sav = readsav(path, verbose=verbose)
+    df = pd.DataFrame(sav["cgroupparams"].byteswap().newbyteorder(),
+                      columns=sav["rownames"].astype(str))
+    return df
 
 
 @njit
