@@ -206,10 +206,10 @@ class PSF2DProcessor(object):
     def _preprocess_stack(self):
         """Remove background and fft pad data"""
         img_raw = self.stack
-        img_raw = remove_bg(img_raw, 1.0)
+        img_raw = remove_bg(center_data(img_raw), 1.0)
         nz, ny, nx = img_raw.shape
         nr = max(ny, nx)
-        img = fft_pad(img_raw, (new_nz, nr, nr), mode='constant')
+        img = fft_pad(img_raw, (None, nr, nr), mode='constant')
         return img
 
     def calc_infocus_psf(self, filter_kspace=True, filter_xspace=True):
@@ -238,7 +238,7 @@ class PSF2DProcessor(object):
 
     def gen_radialOTF(self, lf_cutoff=None, **kwargs):
         """Generate the Radially averaged OTF from the sample data."""
-        img = self._preprocess_stack(256)
+        img = self._preprocess_stack()
         # pull the max x, y size
         nx = max(img.shape[-2:])
         # calculate the um^-1/pix
@@ -256,8 +256,7 @@ class PSF2DProcessor(object):
         self.radprof = radprof
 
         print('Better cutoff is {:.3f}'.format(
-            (abs(self.radprof[:krcutoff]).argmin() -
-             1) / (2 / (self.det_wl) / self.dkr)))
+            (abs(self.radprof[:krcutoff]).argmin() + 1) / (2 / (self.det_wl) / self.dkr)))
 
     def save_radOTF_mrc(self, output_filename, **kwargs):
         # make empty header
