@@ -12,21 +12,17 @@ import os
 import glob
 from skimage.external import tifffile as tif
 import dask
-import dask.distributed
-# out = c.compute(collection)   # c is the client
-# progress(out)
+import dask.multiprocessing
+from dask.diagnostics import ProgressBar
 
 # register dask progress bar
-# ProgressBar().register()
+ProgressBar().register()
 
 
 @dask.delayed(pure=True)
 def compress(path, compression):
     """Compress a tif file, requires that the tif can be read into memory"""
-    with tif.TiffFile(path) as img:
-        if img.pages[0].compression != "deflate":
-            data = img.asarray()
-            tif.imsave(path, data, compress=compression)
+    tif.imsave(path, tif.imread(path), compress=compression)
 
 
 @click.command()
@@ -46,17 +42,12 @@ def cli(src, compression, recursive):
     globpat = "/*.tif"
     if recursive:
         globpat = "/**" + globpat
+    click.echo("Searching for files in {} ... ".format(os.path.abspath(src) + globpat), nl=False)
 
-    click.echo("Starting local cluster")
-    cluster = dask.distributed.LocalCluster()
-    client = dask.distributed.Client(cluster)
-
-    click.echo("Searching for files in {} ... ".format(os.path.abspath(src) + globpat))
-    # Need to make this asynchronous (start farming out work as soon as possible.)
-    futures = [client.submit(compress, path, compression) for path in glob.iglob(src + globpat, recursive=recursive)]
+    to_compute = dask.delayed([compress(path, compression) for path in glob.iglob(src + globpat, recursive=recursive)])
     # click.echo("found {} files".format(len(to_compute)))
-    # track the computation.
-    dask.distributed.progress(futures)
+    # do the computation.
+    to_compute.compute(get=dask.multiprocessing.get)
 
 
 if __name__ == "__main__":
