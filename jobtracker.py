@@ -40,7 +40,8 @@ def get_status_bjobs(user="hoffmand", jobkey="Group"):
         stderr=subprocess.PIPE
     )
     if process.stderr:
-        raise RuntimeError(process.stderr.decode())
+        print(process.stderr.decode())
+        return False
     # if more than one line jobs still running.
     return len(process.stdout.decode().split(os.linesep)) > 1
 
@@ -104,7 +105,7 @@ def cli(jobkey, user, recipient, subject, poletime, queue):
     if recipient is None:
         recipient = "{}@janelia.hhmi.org".format(user)
 
-    click.echo("Watching for jobs '{}' for user {}".format(jobkey, user))
+    click.echo("Watching for jobs '{}' for user {} on {}".format(jobkey, user, prefix))
     watcher(jobkey, user, recipient, subject, poletime, queue)
 
 
