@@ -42,7 +42,7 @@ def cli(src, compression, recursive):
     globpat = "/*.tif"
     if recursive:
         globpat = "/**" + globpat
-    click.echo("Searching for files in {} ... ".format(os.path.abspath(src) + globpat), nl=False)
+    click.echo("Searching for files in {} ... ".format(os.path.abspath(src) + globpat))
 
     to_compute = dask.delayed([compress(path, compression) for path in glob.iglob(src + globpat, recursive=recursive)])
     # click.echo("found {} files".format(len(to_compute)))

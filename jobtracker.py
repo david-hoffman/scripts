@@ -30,6 +30,21 @@ def get_qstat(user="hoffmand"):
     return process.stdout.decode().split(os.linesep)
 
 
+def get_status_bjobs(user="hoffmand", jobkey="Group"):
+    """Get qstat for user"""
+    jobkey = "*{}*".format(jobkey)
+    process = subprocess.run(
+        ["bjobs", "-u", user, "-J", jobkey],
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    if process.stderr:
+        raise RuntimeError(process.stderr.decode())
+    # if more than one line jobs still running.
+    return len(process.stdout.decode().split(os.linesep)) > 1
+
+
 def get_jobnames(qstat):
     """Extract job names from get_qstat return"""
     # The first line is header, the second line is dashes
@@ -52,12 +67,12 @@ def changed(old, new):
     return new, old is not new
 
 
-def watcher(jobkey, user, recipient, subject, poletime):
+def watcher(jobkey, user, recipient, subject, poletime, status_getter):
     """Set a watcher for qsub jobs that will send an email alert"""
     old_status = False
     while True:
         # dave_stat = !qstat -j Group* -u hoffmand
-        new_status = get_status(user, jobkey)
+        new_status = status_getter(user, jobkey)
         old_status, status_changed = changed(old_status, new_status)
         if status_changed:
             if not old_status:
@@ -74,16 +89,23 @@ def watcher(jobkey, user, recipient, subject, poletime):
 @click.option('--recipient', default=None, help="The recipient's email address")
 @click.option('--subject', default=None, help="The subject line of the email")
 @click.option('--poletime', default=60, help="Time between poles for (in seconds)")
-def cli(jobkey, user, recipient, subject, poletime):
+@click.option('--bsub', 'queue', flag_value=get_status_bjobs, default=True)
+@click.option('--qsub', 'queue', flag_value=get_status)
+def cli(jobkey, user, recipient, subject, poletime, queue):
     """The thing that does work"""
     if subject is None:
-        subject = "qsub {} Job Done".format(jobkey)
+        if queue == get_status_bjobs:
+            prefix = "bsub"
+        else:
+            prefix = "qsub"
+        subject = "{} {} Job Done".format(prefix, jobkey)
     if user is None:
         user = os.getlogin()
     if recipient is None:
         recipient = "{}@janelia.hhmi.org".format(user)
+
     click.echo("Watching for jobs '{}' for user {}".format(jobkey, user))
-    watcher(jobkey, user, recipient, subject, poletime)
+    watcher(jobkey, user, recipient, subject, poletime, queue)
 
 
 if __name__ == '__main__':
