@@ -34,7 +34,7 @@ def get_status_bjobs(user="hoffmand", jobkey="Group"):
     """Get qstat for user"""
     jobkey = "*{}*".format(jobkey)
     process = subprocess.run(
-        ["bjobs", "-u", user, "-J", jobkey],
+        "bjobs -u {} -J {}".format(user, jobkey),
         shell=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
