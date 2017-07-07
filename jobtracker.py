@@ -32,15 +32,14 @@ def get_qstat(user="hoffmand"):
 
 def get_status_bjobs(user="hoffmand", jobkey="Group"):
     """Get qstat for user"""
-    jobkey = "*{}*".format(jobkey)
     process = subprocess.run(
-        "bjobs -u {} -J {}".format(user, jobkey),
+        "bjobs -u {} -J *{}*".format(user, jobkey),
         shell=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
     )
     if process.stderr:
-        print(process.stderr.decode())
+        # print(process.stderr.decode())
         return False
     # if more than one line jobs still running.
     return len(process.stdout.decode().split(os.linesep)) > 1
