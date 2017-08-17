@@ -23,6 +23,93 @@ def peakselector_df(path, verbose=False):
     return df
 
 
+def grouped_peaks(df):
+    """Return a DataFrame with only grouped peaks."""
+    return df[df["Frame Index in Grp"] == 1]
+
+
+class PALMData(object):
+    """A simple class to manipulate peakselector data"""
+    # columns we want to keep
+    peak_col = {
+        'X Position': "xpos",
+        'Y Position': "ypos",
+        '6 N Photons': "nphotons",
+        'Frame Number': "framenum",
+        'Sigma X Pos Full': "sigmax",
+        'Sigma Y Pos Full': "sigmay",
+        'Z Position': 'zpos',
+        'Offset': 'offset',
+        'Amplitude': 'amp'
+    }
+
+    group_col = {
+        'Frame Number': 'framenum',
+        'Group X Position': 'xpos',
+        'Group Y Position': 'ypos',
+        'Group Sigma X Pos': 'sigmax',
+        'Group Sigma Y Pos': 'sigmay',
+        'Group N Photons': 'nphotons',
+        '24 Group Size': 'groupsize',
+        'Group Z Position': 'zpos',
+        'Offset': 'offset',
+        'Amplitude': 'amp'
+    }
+
+    def __init__(self, path_to_sav, *args, verbose=True, init=False, **kwargs):
+        """To initialize the experiment we need to know where the raw data is
+        and where the peakselector processed data is
+        
+        Assumes paths_to_raw are properly sorted"""
+            
+        # load peakselector data
+        raw_df = peakselector_df(path_to_sav, verbose=verbose)
+        # convert Frame number to int
+        self.processed = raw_df[list(self.peak_col.keys())]
+        self.processed = self.processed.astype(float)
+        self.grouped = grouped_peaks(raw_df)[list(self.group_col.keys())]
+        # normalize column names
+        self.processed = self.processed.rename(columns=self.peak_col)
+        self.grouped = self.grouped.rename(columns=self.group_col)
+        self.processed["framenum"] = self.processed["framenum"].astype(int)
+        self.grouped["framenum"] = self.grouped["framenum"].astype(int)
+        self.grouped["groupsize"] = self.grouped["groupsize"].astype(int)
+        # initialize filtered ones
+        self.processed_filtered = None
+        self.grouped_filtered = None
+
+    def filter_peaks(self, offset=1000, sigma_max=3, nphotons=0, groupsize=5000):
+        """Filter internal dataframes"""
+        for df_title in ("processed", "grouped"):
+            df = self.__dict__[df_title]
+            filter_series = (
+                (df.offset > 0) & # we know that offset should be around this value.
+                (df.offset < offset) &
+                (df.sigmax < sigma_max) &
+                (df.sigmay < sigma_max) &
+                (df.nphotons > nphotons)
+            )
+            if "groupsize" in df.keys():
+                filter_series &= df.groupsize < groupsize
+            self.__dict__[df_title + "_filtered"] = df[filter_series]
+
+    def hist(self, data_type="grouped", filtered=False):
+        if data_type == "grouped":
+            if filtered:
+                df = self.grouped_filtered
+            else:
+                df = self.grouped
+        elif data_type == "processed":
+            if filtered:
+                df = self.processed_filtered
+            else:
+                df = self.processed
+        else:
+            raise TypeError("Data type {} is of unknown type".format(data_type))
+        return df[['offset', 'amp', 'xpos', 'ypos', 'nphotons',
+            'sigmax', 'sigmay', 'zpos']].hist(bins=128, figsize=(12, 12), log=True)
+
+
 @njit
 def jit_hist3d(zpositions, ypositions, xpositions, shape):
     """Generate a histogram of points in 3D
@@ -146,7 +233,8 @@ def fast_hist3d(sample, bins, myrange=None, weights=None):
         return np.zeros(nbin - 2), edges
 
     # Compute the bin number each sample falls into.
-    Ncount = [np.digitize(sample[:, i], edges[i]) for i in range(D)]
+    # np.digitize returns an int64 array when it only needs to be uint32
+    Ncount = [np.digitize(sample[:, i], edges[i]).astype(np.uint32) for i in range(D)]
     shape = tuple(len(edges[i]) - 1 for i in range(D))  # -1 for outliers
 
     # Using digitize, values that fall on an edge are put in the right bin.
@@ -208,7 +296,9 @@ def fast_hist3d(sample, bins, myrange=None, weights=None):
     # if (hist.shape != nbin - 2).any():
     #     raise RuntimeError(
     #         "Internal Shape Error")
-
+    # for n in Ncount:
+    #     print(n.shape)
+    #     print(n.dtype)
     if weights is not None:
         weights = np.asarray(weights)
         hist = jit_hist3d_with_weights(*Ncount, weights=weights, shape=shape)
