@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 # regular plotting
 import matplotlib.pyplot as plt
-from matplotlib.colors import LogNorm
+from matplotlib.colors import LogNorm, PowerNorm
 
 # data loading
 from scipy.io import readsav
@@ -25,9 +25,14 @@ import tqdm
 # Need partial
 from functools import partial
 
+# need otsu
+from skimage.filters import threshold_otsu
+
 
 # Register ProgressBar
-ProgressBar().register()
+# can unregister with handel.
+pb = ProgressBar()
+pb.register()
 
 # Lazy functions for raw data handling
 lazy_imread = dask.delayed(tif.imread, pure=True)
@@ -94,7 +99,7 @@ def filter_fiducials(df, blobs, radius):
     If initial DataFrame is 18 GB (1 GB per column) and we have 200 """
     blob_filt = pd.Series(np.ones(len(df)), index=df.index, dtype=bool)
     for i, (y, x) in enumerate(tqdm.tqdm_notebook(blobs, leave=False, desc="Filtering Fiducials")):
-        bead_filter = np.sqrt((df.xpos - x) ** 2 + (df.ypos - y) ** 2) > radius
+        bead_filter = np.sqrt((df.x0 - x) ** 2 + (df.y0 - y) ** 2) > radius
         blob_filt &= bead_filter
         del bead_filter
         if not i % 10:
@@ -104,28 +109,43 @@ def filter_fiducials(df, blobs, radius):
     return df
 
 
-def find_fiducials(df, ybins, xbins, thresh=50, sigma=4, subsampling=10, diagnostics=False):
-    """Find fiducials in pointilist PALM data"""
+def palm_hist(df, yx_shape, subsampling=1):
+    bins = [np.arange(s + subsampling, step=subsampling) - subsampling / 2 for s in yx_shape]
     # ungrouped 2d histogram to find peaks, ungrouped to make beads really stand out
-    hist_2d = np.histogramdd(df[["ypos", "xpos"]].values, bins=(ybins, xbins))[0]
-    pf = PeakFinder(hist_2d, sigma * subsampling)
-    pf.thresh = thresh / subsampling
-    sub_sample_xy = ybins[1] - ybins[0]
-    # find blobs
+    return np.histogramdd(df[["y0", "x0"]].values, bins=bins)[0]
+
+
+def find_fiducials(df, yx_shape, subsampling=1, diagnostics=False, **kwargs):
+    """Find fiducials in pointilist PALM data
+    
+    The key here is to realize that there should be on fiducial per frame"""
+    # incase we subsample the frame number
+    num_frames = df.frame.max() - df.frame.min()
+    hist_2d = palm_hist(df, yx_shape, subsampling)
+    pf = PeakFinder(hist_2d.astype(int), 1)
+    pf.blob_sigma = 1/subsampling
+    # no blobs found so try again with a lower threshold
+    pf.thresh = 0
     pf.find_blobs()
-    pf.remove_edge_blobs(sigma)
+    blob_thresh = max(threshold_otsu(pf.blobs[:, 3]), num_frames / 10)
+    if not pf.blobs.size:
+        # still no blobs then raise error
+        raise RuntimeError("No blobs found!")
+    pf.blobs = pf.blobs[pf.blobs[:,3] > blob_thresh]
+    if pf.blobs[:, 3].max() < num_frames * subsampling / 2:
+        print("Warning, drift maybe too high to find fiducials")
     if diagnostics:
-        pf._blobs[:, 3] = np.arange(len(pf.blobs))
-        pf.plot_blobs(size=12, norm=LogNorm())
-    return pf.blobs[:, :2] / subsampling
+        pf.plot_blobs(**kwargs)
+    # correct positions for subsampling
+    return pf.blobs[:, :2] * subsampling
 
 
-def remove_fiducials(df, ybins, xbins, df2=None, exclusion_radius=5, **kwargs):
+def remove_fiducials(df, yx_shape, df2=None, exclusion_radius=1, **kwargs):
     """Remove fiducials by first finding them in a histogram of localizations and then
     removing all localizations with in exclusion radius of the found ones"""
     if df2 is None:
         df2 = df
-    blobs = find_fiducials(df, ybins, xbins, **kwargs)
+    blobs = find_fiducials(df, yx_shape, **kwargs)
     df3 = filter_fiducials(df2, blobs, exclusion_radius)
     # plt.matshow(np.histogramdd(df3[["Y Position", "X Position"]].values, bins=(ybins, xbins))[0], vmax=10, cmap="inferno")
     return df3
@@ -240,26 +260,28 @@ class RawImages(object):
 class PALMExperiment(object):
     """A simple class to organize our experimental data"""
     peak_col = {
-        'X Position': "xpos",
-        'Y Position': "ypos",
+        'X Position': "x0",
+        'Y Position': "y0",
         '6 N Photons': "nphotons",
-        'Frame Number': "framenum",
-        'Sigma X Pos Full': "sigmax",
-        'Sigma Y Pos Full': "sigmay",
-        'Z Position': 'zpos',
+        'Frame Number': "frame",
+        'Sigma X Pos Full': "sigma_x",
+        'Sigma Y Pos Full': "sigma_y",
+        'Sigma Z': "sigma_z",
+        'Z Position': 'z0',
         'Offset': 'offset',
         'Amplitude': 'amp'
     }
 
     group_col = {
-        'Frame Number': 'framenum',
-        'Group X Position': 'xpos',
-        'Group Y Position': 'ypos',
-        'Group Sigma X Pos': 'sigmax',
-        'Group Sigma Y Pos': 'sigmay',
+        'Frame Number': 'frame',
+        'Group X Position': 'x0',
+        'Group Y Position': 'y0',
+        'Group Sigma X Pos': 'sigma_x',
+        'Group Sigma Y Pos': 'sigma_y',
+        'Sigma Z': "sigma_z",
         'Group N Photons': 'nphotons',
         '24 Group Size': 'groupsize',
-        'Group Z Position': 'zpos',
+        'Group Z Position': 'z0',
         'Offset': 'offset',
         'Amplitude': 'amp'
     }
@@ -271,10 +293,10 @@ class PALMExperiment(object):
         Assumes paths_to_raw are properly sorted"""
         
         # deal with raw data
-        if isinstance(raw_or_paths_to_raw, RawImages):
-            self.raw = raw_or_paths_to_raw
-        else:
+        try:
             self.raw = RawImages(raw_or_paths_to_raw)
+        except TypeError:
+            self.raw = raw_or_paths_to_raw
             
         # load peakselector data
         raw_df = peakselector_df(path_to_sav, verbose=verbose)
@@ -300,8 +322,8 @@ class PALMExperiment(object):
             filter_series = (
                 (df.offset > 0) & # we know that offset should be around this value.
                 (df.offset < offset) &
-                (df.sigmax < sigma_max) &
-                (df.sigmay < sigma_max) &
+                (df.sigma_x < sigma_max) &
+                (df.sigma_y < sigma_max) &
                 (df.nphotons > nphotons)
             )
             if "groupsize" in df.keys():
@@ -319,11 +341,11 @@ class PALMExperiment(object):
     def make_group_report(self, **kwargs):
         return make_report(self, "Grouped", **kwargs)
 
-    def remove_fiducials(self, subsampling=10, exclusion_radius=5, **kwargs):
-        ybins, xbins = calc_bins(self.raw.raw, subsampling)
+    def remove_fiducials(self, subsampling=1, exclusion_radius=1, **kwargs):
+        yx_shape = self.raw.raw.shape[1:]
         # use processed to find fiducials.
         for df_title in ("processed_filtered", "grouped_filtered"):
-            self.__dict__[df_title] = remove_fiducials(self.processed, ybins, xbins, self.__dict__[df_title],
+            self.__dict__[df_title] = remove_fiducials(self.processed, yx_shape, self.__dict__[df_title],
                                   exclusion_radius=exclusion_radius, **kwargs)
 
     @property
@@ -381,14 +403,14 @@ def make_report(expt, prefix="Frame", start=None, end=None, bins=None, nbins=Non
     x_frames = x_frames[s]
 
     # add a column which is the frame number in replicates
-    df_frame["framenum_rep"] = df_frame.framenum % rep_len
+    df_frame["frame_rep"] = df_frame.frame % rep_len
 
     # filter what frames to look at with in each repetition
-    df_frame = df_frame[(start < df_frame.framenum_rep) & (df_frame.framenum_rep < end)]
+    df_frame = df_frame[(start < df_frame.frame_rep) & (df_frame.frame_rep < end)]
 
     # group the replicants together
-    df_groupby_reps = df_frame.groupby(pd.cut(df_frame.framenum, np.arange(0, data_len + 1, rep_len)))
-    df_groupby_frame = df_frame.groupby("framenum")
+    df_groupby_reps = df_frame.groupby(pd.cut(df_frame.frame, np.arange(0, data_len + 1, rep_len)))
+    df_groupby_frame = df_frame.groupby("frame")
 
     # estimate normalization factors (proportional to total intensity and
     # therefore number of fluorophores)
@@ -410,7 +432,7 @@ def make_report(expt, prefix="Frame", start=None, end=None, bins=None, nbins=Non
     localizations_per_frame = localizations_per_frame.values.reshape(num_rep, -1)
     localizations_norm = (localizations_per_frame / norm_factors[:, None])
 
-    vars_to_save = ["nphotons", "zpos", "ypos", "xpos", "sigmay", "sigmax", "amp", "offset"]
+    vars_to_save = ["nphotons", "z0", "y0", "x0", "sigma_y", "sigma_x", "amp", "offset"]
     return_data = dict(
         df_frame=df_frame[vars_to_save].mean(),
         df_groupby_reps=df_groupby_reps[vars_to_save].mean(),
@@ -481,7 +503,7 @@ def make_report(expt, prefix="Frame", start=None, end=None, bins=None, nbins=Non
     hist_gnph.set_xscale("log")
 
     
-    for col, ax in zip(("sigmax", "sigmay"), (hist_gsx, hist_gsy)):
+    for col, ax in zip(("sigma_x", "sigma_y"), (hist_gsx, hist_gsy)):
         bins=np.linspace(0, 1, nbins)
         df_groupby_reps[col].hist(
             bins=bins,
