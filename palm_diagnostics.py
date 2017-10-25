@@ -31,6 +31,7 @@ from skimage.filters import threshold_otsu
 # for fast hist
 from numpy.core import atleast_1d, atleast_2d
 from numba import njit
+from scipy.spatial import cKDTree
 
 
 def peakselector_df(path, verbose=False):
@@ -111,6 +112,72 @@ def filter_fiducials(df, blobs, radius):
     df = df[blob_filt]
     return df
 
+
+def extract_fiducials(df, blobs, radius, min_num_frames=0):
+    """Do the actual filtering
+    
+    We're doing it sequentially because we may run out of memory.
+    If initial DataFrame is 18 GB (1 GB per column) and we have 200 """
+    fiducials_dfs = [df[np.sqrt((df.x0 - x) ** 2 + (df.y0 - y) ** 2) < radius]
+        for y, x in tqdm.tqdm_notebook(blobs, leave=True, desc="Extracting Fiducials")]
+#     # remove any duplicates in a given frame by only keeping the localization with the largest count
+#     clean_fiducials = [sub_df.sort_values('amp', ascending=False).groupby('frame').first()
+#                        for sub_df in fiducials_dfs if len(sub_df) > min_num_frames]
+    return fiducials_dfs
+
+
+def prune_peaks(peaks, radius):
+        """
+        Pruner method takes blobs list with the third column replaced by
+        intensity instead of sigma and then removes the less intense blob
+        if its within diameter of a more intense blob.
+
+        Parameters
+        ----------
+        peaks : pandas DataFrame
+        diameter : float
+            Allowed spacing between blobs
+
+        Returns
+        -------
+        A : ndarray
+            `array` with overlapping blobs removed.
+        """
+
+        # make a copy of blobs otherwise it will be changed
+        # create the tree
+        kdtree = cKDTree(peaks[["y0", "x0"]].values)
+        # query all pairs of points within diameter of each other
+        list_of_conflicts = list(kdtree.query_pairs(radius))
+        # sort the collisions by max amplitude of the pair
+        # we want to deal with collisions between the largest
+        # blobs and nearest neighbors first:
+        # Consider the following sceneario in 1D
+        # A-B-C
+        # are all the same distance and colliding with amplitudes
+        # A > B > C
+        # if we start with the smallest, both B and C will be discarded
+        # If we start with the largest, only B will be
+        # Sort in descending order
+        list_of_conflicts.sort(
+            key=lambda x: max(peaks.amp.iloc[x[0]], peaks.amp.iloc[x[1]]),
+            reverse=True
+        )
+        # indices of pruned blobs
+        pruned_peaks = set()
+        # loop through conflicts
+        for idx_a, idx_b in list_of_conflicts:
+            # see if we've already pruned one of the pair
+            if (idx_a not in pruned_peaks) and (idx_b not in pruned_peaks):
+                # compare based on amplitude
+                if peaks.amp.iloc[idx_a] > peaks.amp.iloc[idx_b]:
+                    pruned_peaks.add(idx_b)
+                else:
+                    pruned_peaks.add(idx_a)
+        # return pruned dataframe
+        return peaks.iloc[[
+            i for i in range(len(peaks)) if i not in pruned_peaks]
+        ]
 
 def palm_hist(df, yx_shape, subsampling=1):
     bins = [np.arange(s + subsampling, step=subsampling) - subsampling / 2 for s in yx_shape]
@@ -363,8 +430,7 @@ class PALMData(object):
         self.filter_peaks(*args)
         self.remove_fiducials(**kwargs)
 
-    def remove_fiducials(self, subsampling=1, exclusion_radius=1, **kwargs):
-        yx_shape = self.raw.raw.shape[1:]
+    def remove_fiducials(self, yx_shape, subsampling=1, exclusion_radius=1, **kwargs):
         # use processed to find fiducials.
         for df_title in ("processed_filtered", "grouped_filtered"):
             self.__dict__[df_title] = remove_fiducials(self.processed, yx_shape, self.__dict__[df_title],
@@ -809,3 +875,41 @@ def fast_hist3d(sample, bins, myrange=None, weights=None):
     else:
         hist = jit_hist3d(*Ncount, shape=shape)
     return hist, edges
+
+
+def measure_peak_widths(y):
+    """Assumes binary data"""
+    d = np.diff(y)
+    i = np.arange(len(d))
+    rising_edges = i[d > 0]
+    falling_edges = i[d < 0]
+    # need to deal with all cases
+    # same number of edges
+    if len(rising_edges) == len(falling_edges):
+        if len(rising_edges) == 0:
+            return 0
+        # starting and ending with peak
+        # if falling edge is first we remove it
+        if falling_edges.min() < rising_edges.min():
+            widths = np.append(falling_edges, i[-1]) - np.append(0, rising_edges)
+        else:
+            # only peaks in the middle
+            widths = falling_edges - rising_edges
+    else:
+        # different number of edges
+        if len(rising_edges) < len(falling_edges):
+            # starting with peak
+            widths = falling_edges - np.append(0, rising_edges)
+        else:
+            # ending with peak
+            widths = np.append(falling_edges, i[-1]) - rising_edges
+    return widths
+
+
+def count_blinks(offtimes, gap):
+    breaks = np.nonzero(offtimes > gap)[0]
+    if breaks.size:
+        blinks = [offtimes[breaks[i] + 1:breaks[i+1]] for i in range(breaks.size - 1)]
+    else:
+        blinks = [offtimes]
+    return ([len(blink) for blink in blinks])
