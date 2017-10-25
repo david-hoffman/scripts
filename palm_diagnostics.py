@@ -28,6 +28,18 @@ from functools import partial
 # need otsu
 from skimage.filters import threshold_otsu
 
+# for fast hist
+from numpy.core import atleast_1d, atleast_2d
+from numba import njit
+
+
+def peakselector_df(path, verbose=False):
+    """Read a peakselector file into a pandas dataframe"""
+    print("Reading {} into memory ... ".format(path))
+    sav = readsav(path, verbose=verbose)
+    # pull out cgroupparams, set the byteorder to native and set the rownames
+    df = pd.DataFrame(sav["cgroupparams"].byteswap().newbyteorder(), columns=sav["rownames"].astype(str))
+    return df
 
 # Register ProgressBar
 # can unregister with handel.
@@ -59,15 +71,6 @@ def lazy_bg(lazy_data, num_frames=100):
     """Take the median of the last num_frames and compute the mean of the median
     frame to estimate the background and bead contributions"""
     return lazy_data[-num_frames:].median(0).mean().compute()
-
-
-def peakselector_df(path, verbose=False):
-    """Read a peakselector file into a pandas dataframe"""
-    print("Reading {} into memory ... ".format(path))
-    sav = readsav(path, verbose=verbose)
-    # pull out cgroupparams, set the byteorder to native and set the rownames
-    df = pd.DataFrame(sav["cgroupparams"].byteswap().newbyteorder(), columns=sav["rownames"].astype(str))
-    return df
 
 
 def print_maxmin(k, df):
@@ -257,8 +260,11 @@ class RawImages(object):
         return np.median(self.raw[-num_frames:], 0).mean()
 
 
-class PALMExperiment(object):
-    """A simple class to organize our experimental data"""
+class PALMData(object):
+    """A simple class to manipulate peakselector data"""
+    # columns we want to keep
+
+
     peak_col = {
         'X Position': "x0",
         'Y Position': "y0",
@@ -286,22 +292,16 @@ class PALMExperiment(object):
         'Amplitude': 'amp'
     }
 
-    def __init__(self, raw_or_paths_to_raw, path_to_sav, *args, verbose=True, init=False, **kwargs):
+    def __init__(self, path_to_sav, verbose=False):
         """To initialize the experiment we need to know where the raw data is
         and where the peakselector processed data is
         
         Assumes paths_to_raw are properly sorted"""
         
-        # deal with raw data
-        try:
-            self.raw = RawImages(raw_or_paths_to_raw)
-        except TypeError:
-            self.raw = raw_or_paths_to_raw
-            
         # load peakselector data
-        raw_df = peakselector_df(path_to_sav, verbose=verbose)
+        raw_df = peakselector_df(path_to_sav, verbose=verbose).astype(float)
         # convert Frame number to int
-        raw_df['Frame Number'] = raw_df['Frame Number'].astype(int)
+        raw_df[['Frame Number', '24 Group Size']] = raw_df[['Frame Number', '24 Group Size']].astype(int)
         self.processed = raw_df[list(self.peak_col.keys())]
         self.grouped = grouped_peaks(raw_df)[list(self.group_col.keys())]
         # normalize column names
@@ -310,10 +310,38 @@ class PALMExperiment(object):
         # initialize filtered ones
         self.processed_filtered = None
         self.grouped_filtered = None
-        # do a bunch of calculations now
-        if init:
-            self.filter_peaks_and_beads()
-            self.raw_mean
+
+    def filter_peaks(self, offset=1000, sigma_max=3, nphotons=0, groupsize=5000):
+        """Filter internal dataframes"""
+        for df_title in ("processed", "grouped"):
+            df = self.__dict__[df_title]
+            filter_series = (
+                (df.offset > 0) & # we know that offset should be around this value.
+                (df.offset < offset) &
+                (df.sigmax < sigma_max) &
+                (df.sigmay < sigma_max) &
+                (df.nphotons > nphotons)
+            )
+            if "groupsize" in df.keys():
+                filter_series &= df.groupsize < groupsize
+            self.__dict__[df_title + "_filtered"] = df[filter_series]
+
+    def hist(self, data_type="grouped", filtered=False):
+        if data_type == "grouped":
+            if filtered:
+                df = self.grouped_filtered
+            else:
+                df = self.grouped
+        elif data_type == "processed":
+            if filtered:
+                df = self.processed_filtered
+            else:
+                df = self.processed
+        else:
+            raise TypeError("Data type {} is of unknown type".format(data_type))
+        return df[['offset', 'amp', 'xpos', 'ypos', 'nphotons',
+            'sigmax', 'sigmay', 'zpos']].hist(bins=128, figsize=(12, 12), log=True)
+
 
     def filter_peaks(self, offset=1000, sigma_max=3, nphotons=0, groupsize=5000):
         """Filter internal dataframes"""
@@ -335,18 +363,41 @@ class PALMExperiment(object):
         self.filter_peaks(*args)
         self.remove_fiducials(**kwargs)
 
-    def make_frame_report(self, **kwargs):
-        return make_report(self, "Frame", **kwargs)
-
-    def make_group_report(self, **kwargs):
-        return make_report(self, "Grouped", **kwargs)
-
     def remove_fiducials(self, subsampling=1, exclusion_radius=1, **kwargs):
         yx_shape = self.raw.raw.shape[1:]
         # use processed to find fiducials.
         for df_title in ("processed_filtered", "grouped_filtered"):
             self.__dict__[df_title] = remove_fiducials(self.processed, yx_shape, self.__dict__[df_title],
                                   exclusion_radius=exclusion_radius, **kwargs)
+
+
+class PALMExperiment(object):
+    """A simple class to organize our experimental data"""
+
+    def __init__(self, raw_or_paths_to_raw, path_to_sav, *args, verbose=True, init=False, **kwargs):
+        """To initialize the experiment we need to know where the raw data is
+        and where the peakselector processed data is
+        
+        Assumes paths_to_raw are properly sorted"""
+        
+        # deal with raw data
+        try:
+            self.raw = RawImages(raw_or_paths_to_raw)
+        except TypeError:
+            self.raw = raw_or_paths_to_raw
+            
+        # load peakselector data
+        self.palm = PALMData(path_to_sav, verbose=verbose)
+
+        if init:
+            self.palm.filter_peaks_and_beads()
+            self.raw_mean
+
+    def make_frame_report(self, **kwargs):
+        return make_report(self, "Frame", **kwargs)
+
+    def make_group_report(self, **kwargs):
+        return make_report(self, "Grouped", **kwargs)
 
     @property
     def raw_mean(self):
@@ -557,3 +608,204 @@ def make_report(expt, prefix="Frame", start=None, end=None, bins=None, nbins=Non
     fig.tight_layout()
     
     return fig, axs, return_data
+
+
+### Fast histogram stuff
+
+
+
+@njit
+def jit_hist3d(zpositions, ypositions, xpositions, shape):
+    """Generate a histogram of points in 3D
+
+    Parameters
+    ----------
+
+    Returns
+    -------
+    res : ndarray
+    """
+    nz, ny, nx = shape
+    res = np.zeros(shape, np.uint32)
+    # need to add ability for arbitraty accumulation
+    for z, y, x in zip(zpositions, ypositions, xpositions):
+        # bounds check
+        if x < nx and y < ny and z < nz:
+            res[z, y, x] += 1
+    return res
+
+
+@njit
+def jit_hist3d_with_weights(zpositions, ypositions, xpositions, weights,
+                            shape):
+    """Generate a histogram of points in 3D
+
+    Parameters
+    ----------
+
+    Returns
+    -------
+    res : ndarray
+    """
+    nz, ny, nx = shape
+    res = np.zeros(shape, weights.dtype)
+    # need to add ability for arbitraty accumulation
+    for z, y, x, w in zip(zpositions, ypositions, xpositions, weights):
+        # bounds check
+        if x < nx and y < ny and z < nz:
+            res[z, y, x] += w
+    return res
+
+
+def fast_hist3d(sample, bins, myrange=None, weights=None):
+    """Modified from numpy histogramdd
+    Make a 3d histogram, fast, lower memory footprint"""
+    try:
+        # Sample is an ND-array.
+        N, D = sample.shape
+    except (AttributeError, ValueError):
+        # Sample is a sequence of 1D arrays.
+        sample = atleast_2d(sample).T
+        N, D = sample.shape
+
+    nbin = np.empty(D, int)
+    edges = D * [None]
+    dedges = D * [None]
+
+    try:
+        M = len(bins)
+        if M != D:
+            raise ValueError(
+                'The dimension of bins must be equal to the dimension of the'
+                ' sample x.')
+    except TypeError:
+        # bins is an integer
+        bins = D * [bins]
+
+    # Select range for each dimension
+    # Used only if number of bins is given.
+    if myrange is None:
+        # Handle empty input. Range can't be determined in that case, use 0-1.
+        if N == 0:
+            smin = np.zeros(D)
+            smax = np.ones(D)
+        else:
+            smin = atleast_1d(np.array(sample.min(0), float))
+            smax = atleast_1d(np.array(sample.max(0), float))
+    else:
+        if not np.all(np.isfinite(myrange)):
+            raise ValueError(
+                'myrange parameter must be finite.')
+        smin = np.zeros(D)
+        smax = np.zeros(D)
+        for i in range(D):
+            smin[i], smax[i] = myrange[i]
+
+    # Make sure the bins have a finite width.
+    for i in range(len(smin)):
+        if smin[i] == smax[i]:
+            smin[i] = smin[i] - .5
+            smax[i] = smax[i] + .5
+
+    # avoid rounding issues for comparisons when dealing with inexact types
+    if np.issubdtype(sample.dtype, np.inexact):
+        edge_dt = sample.dtype
+    else:
+        edge_dt = float
+    # Create edge arrays
+    for i in range(D):
+        if np.isscalar(bins[i]):
+            if bins[i] < 1:
+                raise ValueError(
+                    "Element at index %s in `bins` should be a positive "
+                    "integer." % i)
+            nbin[i] = bins[i] + 2  # +2 for outlier bins
+            edges[i] = np.linspace(smin[i], smax[i], nbin[i] - 1, dtype=edge_dt)
+        else:
+            edges[i] = np.asarray(bins[i], edge_dt)
+            nbin[i] = len(edges[i]) + 1  # +1 for outlier bins
+        dedges[i] = np.diff(edges[i]).min()
+        if np.any(np.asarray(dedges[i]) <= 0):
+            raise ValueError(
+                "Found bin edge of size <= 0. Did you specify `bins` with"
+                "non-monotonic sequence?")
+
+    nbin = np.asarray(nbin)
+
+    # Handle empty input.
+    if N == 0:
+        return np.zeros(nbin - 2), edges
+
+    # Compute the bin number each sample falls into.
+    # np.digitize returns an int64 array when it only needs to be uint32
+    Ncount = [np.digitize(sample[:, i], edges[i]).astype(np.uint32) for i in range(D)]
+    shape = tuple(len(edges[i]) - 1 for i in range(D))  # -1 for outliers
+
+    # Using digitize, values that fall on an edge are put in the right bin.
+    # For the rightmost bin, we want values equal to the right edge to be
+    # counted in the last bin, and not as an outlier.
+    for i in range(D):
+        # Rounding precision
+        mindiff = dedges[i]
+        if not np.isinf(mindiff):
+            decimal = int(-np.log10(mindiff)) + 6
+            # Find which points are on the rightmost edge.
+            not_smaller_than_edge = (sample[:, i] >= edges[i][-1])
+            on_edge = (np.around(sample[:, i], decimal) ==
+                       np.around(edges[i][-1], decimal))
+            # Shift these points one bin to the left.
+            Ncount[i][np.where(on_edge & not_smaller_than_edge)[0]] -= 1
+
+    # Flattened histogram matrix (1D)
+    # Reshape is used so that overlarge arrays
+    # will raise an error.
+    # hist = zeros(nbin, float).reshape(-1)
+
+    # # Compute the sample indices in the flattened histogram matrix.
+    # ni = nbin.argsort()
+    # xy = zeros(N, int)
+    # for i in arange(0, D-1):
+    #     xy += Ncount[ni[i]] * nbin[ni[i+1:]].prod()
+    # xy += Ncount[ni[-1]]
+
+    # # Compute the number of repetitions in xy and assign it to the
+    # # flattened histmat.
+    # if len(xy) == 0:
+    #     return zeros(nbin-2, int), edges
+
+    # flatcount = bincount(xy, weights)
+    # a = arange(len(flatcount))
+    # hist[a] = flatcount
+
+    # # Shape into a proper matrix
+    # hist = hist.reshape(sort(nbin))
+    # for i in arange(nbin.size):
+    #     j = ni.argsort()[i]
+    #     hist = hist.swapaxes(i, j)
+    #     ni[i], ni[j] = ni[j], ni[i]
+
+    # # Remove outliers (indices 0 and -1 for each dimension).
+    # core = D*[slice(1, -1)]
+    # hist = hist[core]
+
+    # # Normalize if normed is True
+    # if normed:
+    #     s = hist.sum()
+    #     for i in arange(D):
+    #         shape = ones(D, int)
+    #         shape[i] = nbin[i] - 2
+    #         hist = hist / dedges[i].reshape(shape)
+    #     hist /= s
+
+    # if (hist.shape != nbin - 2).any():
+    #     raise RuntimeError(
+    #         "Internal Shape Error")
+    # for n in Ncount:
+    #     print(n.shape)
+    #     print(n.dtype)
+    if weights is not None:
+        weights = np.asarray(weights)
+        hist = jit_hist3d_with_weights(*Ncount, weights=weights, shape=shape)
+    else:
+        hist = jit_hist3d(*Ncount, shape=shape)
+    return hist, edges
