@@ -26,7 +26,10 @@ import tqdm
 from functools import partial
 
 # need otsu
-from skimage.filters import threshold_otsu
+from skimage.filters import threshold_otsu, threshold_yen
+
+# need ndimage
+import scipy.ndimage as ndi
 
 # for fast hist
 from numpy.core import atleast_1d, atleast_2d
@@ -42,36 +45,7 @@ def peakselector_df(path, verbose=False):
     df = pd.DataFrame(sav["cgroupparams"].byteswap().newbyteorder(), columns=sav["rownames"].astype(str))
     return df
 
-# Register ProgressBar
-# can unregister with handel.
 pb = ProgressBar()
-pb.register()
-
-# Lazy functions for raw data handling
-lazy_imread = dask.delayed(tif.imread, pure=True)
-
-
-def make_lazy_data(paths):
-    """Make a lazy data array from a set of paths to data
-
-    Assumes all data is of same shape and type."""
-    lazy_data = [lazy_imread(path) for path in paths]
-    # read first image for shape
-    sample = tif.imread(paths[0])
-    data = [dask.array.from_delayed(ld, shape=sample.shape, dtype=sample.dtype) for ld in lazy_data]
-    data_array = dask.array.concatenate(data)
-    return data_array
-
-
-def lazy2mean(lazy_data):
-    """return the mean of lazy_data"""
-    return lazy_data.mean((1, 2)).compute(get=dask.multiprocessing.get)
-
-
-def lazy_bg(lazy_data, num_frames=100):
-    """Take the median of the last num_frames and compute the mean of the median
-    frame to estimate the background and bead contributions"""
-    return lazy_data[-num_frames:].median(0).mean().compute()
 
 
 def print_maxmin(k, df):
@@ -298,6 +272,20 @@ class memoize(object):
         return res
 
 
+# Lazy functions for raw data handling
+lazy_imread = dask.delayed(tif.imread, pure=True)
+
+def make_lazy_data(paths):
+    """Make a lazy data array from a set of paths to data
+
+    Assumes all data is of same shape and type."""
+    lazy_data = [lazy_imread(path) for path in paths]
+    # read first image for shape
+    sample = tif.imread(paths[0])
+    data = [dask.array.from_delayed(ld, shape=sample.shape, dtype=sample.dtype) for ld in lazy_data]
+    data_array = dask.array.concatenate(data)
+    return data_array
+
 class RawImages(object):
     """A container for lazy raw images"""
     
@@ -307,24 +295,78 @@ class RawImages(object):
     def __len__(self):
         return len(self.raw)
 
+    def make_fiducial_mask(self, frames=slice(-100, None), iters=2,
+                           diagnostics=False, dilation_kwargs=None, **kwargs):
+        """Make a mask for the fiducials"""
+        if dilation_kwargs is None:
+            dilation_kwargs = dict(iterations=5)
+        # get the median last frames
+        last_frames = last_frames_temp = np.median(self.raw[frames], 0)
+        for i in range(iters):
+            init_mask = last_frames_temp > threshold_yen(last_frames_temp)
+            last_frames_temp = last_frames_temp * (~init_mask)
+        
+
+        
+        # the beads/fiducials are high, so we want to negate here
+        mask = ~ndi.binary_dilation(init_mask, **dilation_kwargs)
+        
+        if diagnostics:
+            plot_kwargs = dict(norm=PowerNorm(0.25), vmax=1000, vmin=100, cmap="inferno")
+            if isinstance(diagnostics, dict):
+                plot_kwargs.update(diagnostics)
+            fig, (ax0, ax1) = plt.subplots(2, figsize=(4, 8))
+            ax0.matshow(last_frames, **plot_kwargs)
+            ax1.matshow(mask * last_frames, **plot_kwargs)
+            ax0.set_title("Unmasked")
+            ax1.set_title("Masked")
+            for ax in (ax0, ax1):
+                ax.grid("off")
+                ax.axis("off")
+        
+        # we just made the mask so we should recompute the masked_mean if requested again
+        try:
+            del self.masked_mean
+        except AttributeError:
+            # masked_mean doesn't exist yet so don't worry
+            pass
+        
+        self.mask = mask
+
+
     @property
     def shape(self):
         return self.raw.shape
 
     @cached_property
-    def raw_mean(self):
+    def mean(self):
         """return the mean of lazy_data"""
         return self.raw.mean((1, 2)).compute(get=dask.multiprocessing.get)
 
+    @cached_property
+    def masked_mean(self):
+        """return the masked mean"""
+        raw_reshape = self.raw.reshape(self.raw.shape[0], -1)
+        raw_masked = raw_reshape[:, self.mask.ravel()]
+        return raw_masked.mean(1).compute(get=dask.multiprocessing.get)
+
     @property
     def raw_sum(self):
-        return self.raw_mean * np.prod(self.raw.shape[1:])
+        return self.mean * np.prod(self.raw.shape[1:])
 
     @memoize
-    def raw_bg(self, num_frames=100):
+    def raw_bg(self, num_frames=100, masked=False):
         """Take the median of the last num_frames and compute the mean of the
         median frame to estimate the background and bead contributions"""
-        return np.median(self.raw[-num_frames:], 0).mean()
+        if masked:
+            try:
+                s = self.mask
+            except AttributeError:
+                self.make_fiducial_mask()
+                s = self.mask
+        else:
+            s = slice(None)
+        return np.median(self.raw[-num_frames:], 0)[s].mean()
 
 
 class PALMData(object):
@@ -456,26 +498,14 @@ class PALMExperiment(object):
         self.palm = PALMData(path_to_sav, verbose=verbose)
 
         if init:
-            self.palm.filter_peaks_and_beads()
-            self.raw_mean
+            self.palm.filter_peaks_and_beads(yx_shape=self.raw.shape[-2:])
+            self.raw.mean
 
     def make_frame_report(self, **kwargs):
         return make_report(self, "Frame", **kwargs)
 
     def make_group_report(self, **kwargs):
         return make_report(self, "Grouped", **kwargs)
-
-    @property
-    def raw_mean(self):
-        """return the mean of lazy_data"""
-        return self.raw.raw_mean
-
-    @property
-    def raw_sum(self):
-        return self.raw.raw_sum
-
-    def raw_bg(self, num_frames=100):
-        return self.raw.raw_bg(num_frames)
 
 
 def add_line(ax, data, func=np.mean, c="k", **kwargs):
@@ -490,195 +520,10 @@ def log_bins(data, nbins=128):
     return np.logspace(*logminmax, num=nbins)
 
 
-def make_report(expt, prefix="Frame", start=None, end=None, bins=None, nbins=None):
-    """Make a nice report for Frame peaks"""
-    # fixed parameters, may make arguments
-    num_rep = 3
 
-    # choose right data
-    if prefix == "Frame":
-        df_frame = expt.processed_filtered
-        prefix = "Raw"
-    elif prefix == "Grouped":
-        df_frame = expt.grouped_filtered
-    else:
-        raise ValueError("Unrecognized Prefix")
-
-    # get data lengths
-    data_len = len(expt.raw.raw)
-    rep_len = data_len // num_rep
-    x_frames = np.arange(rep_len)
-
-    # fix start and end for later filtering
-    if start is None:
-        start = 0
-    if end is None:
-        end = rep_len
-
-    # make slice
-    s = slice(start, end)
-    x_frames = x_frames[s]
-
-    # add a column which is the frame number in replicates
-    df_frame["frame_rep"] = df_frame.frame % rep_len
-
-    # filter what frames to look at with in each repetition
-    df_frame = df_frame[(start < df_frame.frame_rep) & (df_frame.frame_rep < end)]
-
-    # group the replicants together
-    df_groupby_reps = df_frame.groupby(pd.cut(df_frame.frame, np.arange(0, data_len + 1, rep_len)))
-    df_groupby_frame = df_frame.groupby("frame")
-
-    # estimate normalization factors (proportional to total intensity and
-    # therefore number of fluorophores)
-    norm_factors = expt.raw_mean.reshape(num_rep, -1)[:, 0] - expt.raw_bg()
-
-    # calculate number of photons emitted per frame and reindex to full number
-    # of frames
-    nphotons_per_frame = df_groupby_frame.mean().nphotons
-    nphotons_per_frame = nphotons_per_frame.reindex(pd.RangeIndex(0, len(expt.raw.raw)))
-
-    # calculate number of localizations per frame and reindex to full number
-    # of frames
-    localizations_per_frame = df_groupby_frame.count().nphotons
-    localizations_per_frame = localizations_per_frame.reindex(pd.RangeIndex(0, len(expt.raw.raw)))
-
-    # make data
-    nphotons_per_frame = nphotons_per_frame.values.reshape(num_rep, -1)
-    nphotons_norm = nphotons_per_frame / norm_factors[:, None]
-    localizations_per_frame = localizations_per_frame.values.reshape(num_rep, -1)
-    localizations_norm = (localizations_per_frame / norm_factors[:, None])
-
-    vars_to_save = ["nphotons", "z0", "y0", "x0", "sigma_y", "sigma_x", "amp", "offset"]
-    return_data = dict(
-        df_frame=df_frame[vars_to_save].mean(),
-        df_groupby_reps=df_groupby_reps[vars_to_save].mean(),
-        nphotons_per_frame=nphotons_per_frame,
-        nphotons_norm=nphotons_norm,
-        localizations_per_frame=localizations_per_frame,
-        localizations_norm=localizations_norm
-    )
-    ####################################################
-
-    # make bins
-    if bins is None and nbins is None:
-        # old default behaviour
-        b0 = np.logspace(2.6, 6, 64)
-        b1 = np.logspace(-1, 2, 64) 
-        b2 = np.logspace(0, 3, 64)
-        b3 = np.logspace(-2, 0.5, 64)
-    elif bins is None and nbins is not None:
-        b0, b1, b2, b3 = [log_bins(d, nbins)
-                            for d in (
-                                df_frame.nphotons.values,
-                                nphotons_norm,
-                                localizations_per_frame,
-                                localizations_norm
-                            )]
-    
-    if nbins is None:
-        nbins = 64
-        
-    if isinstance(bins, tuple):
-        b0, b1, b2, b3 = [np.logspace(*b, nbins) for b in bins]
-    
-    nphotons_bins = b0
-    nphotons_norm_bins = b1
-    localizations_per_frame_bins = b2
-    localizations_norm_bins = b3
-    
-    # set up figure and axs
-    fig, axs = plt.subplots(3, 4, figsize=(16, 12))
-    ax_gnph, hist_gnph, ax_gnph_norm, hist_gnph_norm = axs[0, :]
-    ax_count, hist_count, ax_count_norm, hist_count_norm = axs[1, :]
-    hist_gsx, hist_gsy, ax_decay, ax_bleach = axs[2, :]
-    # plot raw numbers
-    for df_fn, ax, suffix in ((nphotons_per_frame, ax_gnph, " N Photons per Emitter per Frame"),
-                              (localizations_per_frame, ax_count, " Localizations per Frame")):
-        ax.plot(x_frames, df_fn.T[s], alpha=0.5)
-        ax.set_title(prefix + suffix)
-        
-    # plot normalized numbers
-    for df_fn, ax, suffix in ((nphotons_norm, ax_gnph_norm, " N Photons per Emitter per Frame"),
-                              (localizations_norm, ax_count_norm, " Localizations per Frame")):
-        ax.plot(x_frames, df_fn.T[s], alpha=0.5)
-        ax.set_title("Normalized " + prefix + suffix)
-
-    # Label histograms
-    hist_gnph.set_title(prefix + " N Photons")
-    hist_gsx.set_title(prefix + " Sigma X")
-    hist_gsy.set_title(prefix + " Sigma Y")
-    
-    # plot number of photons histogram
-    df_groupby_reps.nphotons.hist(bins=nphotons_bins, log=True, ax=hist_gnph, alpha=0.5, normed=True)
-    ## reset color cycle for lines
-    hist_gnph.set_prop_cycle(None)
-    df_groupby_reps.nphotons.hist(bins=nphotons_bins, log=True, ax=hist_gnph, histtype="step", linewidth=2, normed=True)
-    add_line(hist_gnph, df_frame.nphotons, ls=":")
-    add_line(hist_gnph, df_frame.nphotons, np.median, ls="--")
-    hist_gnph.legend()
-    hist_gnph.set_xscale("log")
-
-    
-    for col, ax in zip(("sigma_x", "sigma_y"), (hist_gsx, hist_gsy)):
-        bins=np.linspace(0, 1, nbins)
-        df_groupby_reps[col].hist(
-            bins=bins,
-            log=False,
-            alpha=0.5,
-            ax=ax,
-            normed=True
-        )
-        ax.set_prop_cycle(None)
-        df_groupby_reps[col].hist(
-            bins=bins,
-            log=False,
-            histtype="step",
-            linewidth=2,
-            ax=ax,
-            normed=True
-        )
-        add_line(ax, df_frame[col], ls=":")
-        add_line(ax, df_frame[col], np.median, ls="--")
-        ax.legend()
-
-    
-    for ax, dd, bins, suffix in zip((hist_gnph_norm, hist_count, hist_count_norm),
-                                    (nphotons_norm, localizations_per_frame, localizations_norm),
-                                    (nphotons_norm_bins, localizations_per_frame_bins, localizations_norm_bins),
-                                    (" N Photons Norm", " Localizations", " Localizations Norm")):
-        for d in dd:
-            d = d[np.isfinite(d)]
-            ax.hist(d, bins=bins, log=True, alpha=0.5, normed=True)
-        ax.set_prop_cycle(None)
-        for d in dd:
-            d = d[np.isfinite(d)]
-            ax.hist(d, bins=bins, log=True, histtype="step", linewidth=2, normed=True)
-
-        ax.set_title(prefix + suffix)
-        add_line(ax, d, ls=":")
-        add_line(ax, d, np.median, ls="--")
-        ax.legend()
-        ax.set_xscale("log")
-
-    
-    ax_bleach.set_title("Bleaching")
-    ax_bleach.plot(norm_factors / norm_factors.max(), "-o", markerfacecolor='red', markeredgecolor='k')
-    
-    ax_decay.set_title("Intensity Decays")
-    ax_decay.plot(x_frames, ((expt.raw_mean.reshape(3, -1) - expt.raw_bg())/norm_factors[:, None]).T[s], alpha=0.5)
-    
-    for ax in (ax_decay, ax_gnph, ax_gnph_norm, ax_count, ax_count_norm):
-        ax.set_xlim(0, rep_len)
-    
-    fig.tight_layout()
-    
-    return fig, axs, return_data
 
 
 ### Fast histogram stuff
-
-
 
 @njit
 def jit_hist3d(zpositions, ypositions, xpositions, shape):
