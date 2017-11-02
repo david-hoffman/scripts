@@ -718,7 +718,8 @@ class PALMExperiment(object):
         # do fit
         if p0 is None:
             if func is weird:
-                p0 = (1e3, 1, -1, 1e2, 0.1, -1)
+                m = self.nofeedback.max()
+                p0 = (m, 1, -1, m / 10, 0.5, -0.5)
                 func_label = ("$y(t) = " + "+".join(["{:.3f} (1 + {:.3f} t)^{{{:.3f}}}"] * 2) + "$")
 
         # do the fit
@@ -736,6 +737,7 @@ class PALMExperiment(object):
         ax.set_ylabel("Mean Intensity")
         ax.set_xlabel("Time (s)")
         ax.set_title(title)
+        return fig, ax
 
     def plot_all(self):
         fig, axs = plt.subplots(3, figsize=(6, 10))
@@ -782,6 +784,24 @@ def log_bins(data, nbins=128):
     minmax = np.nanmin(data), np.nanmax(data)
     logminmax = np.log10(minmax)
     return np.logspace(*logminmax, num=nbins)
+
+def choose_dtype(max_value):
+    """choose the appropriate dtype for saving images"""
+    # if any type of float, use float32
+    if np.issubdtype(np.inexact, max_value):
+        return np.float32
+    # check for integers now
+    if max_value < 2**8:
+        return np.uint8
+    elif max_value < 2**16:
+        return np.uint16
+    elif max_value < 2**32:
+        return np.uint32
+    return np.float32
+
+def tif_convert(data):
+    """convert data for saving as tiff"""
+    return data.astype(choose_dtype(data.max()))
 
 ### Fast histogram stuff
 
