@@ -26,7 +26,7 @@ import tqdm
 from functools import partial
 
 # need otsu
-from skimage.filters import threshold_otsu, threshold_yen
+from skimage.filters import threshold_otsu, threshold_triangle
 
 # need ndimage
 import scipy.ndimage as ndi
@@ -306,10 +306,12 @@ class RawImages(object):
         if dilation_kwargs is None:
             dilation_kwargs = dict(iterations=5)
         # get the median last frames
-        last_frames = last_frames_temp = np.median(self.raw[frames], 0)
-        for i in range(iters):
-            init_mask = last_frames_temp > threshold_yen(last_frames_temp)
-            last_frames_temp[~init_mask] = mode(last_frames_temp.astype(int))
+        # last_frames = last_frames_temp = np.median(self.raw[frames], 0)
+        # last_frames = last_frames_temp = self.mean_img
+        init_mask = self.mean_img > threshold_triangle(self.mean_img)
+        # for i in range(iters):
+        #     init_mask = last_frames_temp > threshold_triangle(last_frames_temp)
+        #     last_frames_temp[~init_mask] = mode(last_frames_temp.astype(int))
         
         # the beads/fiducials are high, so we want to negate here
         mask = ~ndi.binary_dilation(init_mask, **dilation_kwargs)
@@ -319,8 +321,8 @@ class RawImages(object):
             if isinstance(diagnostics, dict):
                 plot_kwargs.update(diagnostics)
             fig, (ax0, ax1) = plt.subplots(2, figsize=(4, 8))
-            ax0.matshow(last_frames, **plot_kwargs)
-            ax1.matshow(mask * last_frames, **plot_kwargs)
+            ax0.matshow(self.mean_img, **plot_kwargs)
+            ax1.matshow(mask * self.mean_img, **plot_kwargs)
             ax0.set_title("Unmasked")
             ax1.set_title("Masked")
             for ax in (ax0, ax1):
