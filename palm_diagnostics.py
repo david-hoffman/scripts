@@ -158,10 +158,18 @@ def prune_peaks(peaks, radius):
             i for i in range(len(peaks)) if i not in pruned_peaks]
         ]
 
-def palm_hist(df, yx_shape, subsampling=1):
-    bins = [np.arange(s + subsampling, step=subsampling) - subsampling / 2 for s in yx_shape]
+def palm_hist(df, yx_shape, subsample=1, zrange=None, zsubsample=None):
+    bins = [np.arange(s + subsample, step=subsample) - subsample / 2 for s in yx_shape]
     # ungrouped 2d histogram to find peaks, ungrouped to make beads really stand out
-    return np.histogramdd(df[["y0", "x0"]].values, bins=bins)[0]
+    keys = ["y0", "x0"]
+    histtype = lambda *args, **kwargs: [np.histogramdd(*args, **kwargs)[0].astype(int)]
+    if zsubsample is not None:
+        if zrange is None:
+            zrange = df.z0.min(), df.z0.max()
+        keys = ["z0"] + keys
+        bins = [np.arange(zrange[0], zrange[1] + zsubsample, step=zsubsample)] + bins
+        histtype = fast_hist3d
+    return histtype(df[keys].values, bins=bins)[0]
 
 
 def find_fiducials(df, yx_shape, subsampling=1, diagnostics=False, **kwargs):
@@ -200,19 +208,19 @@ def remove_fiducials(df, yx_shape, df2=None, exclusion_radius=1, **kwargs):
     return df3
 
 
-def show_frame_and_mode(lazy_data, frame_num=-1):
-    """Show a given frame with a histogram of values and the mode"""
-    frame = v[frame_num].compute()
-    fig, (ax_im, ax_ht) = plt.subplots(1, 2, figsize=(8, 4))
-    ax_im.matshow(frame, vmax=300, cmap="inferno")
-    ax_im.grid("off")
-    ax_im.set_title(k)
-    ax_ht.hist(frame.ravel(), bins=np.logspace(2, 3, 128), log=True)
-    mode = np.bincount(frame[:128, -128:].ravel()).argmax()
-    ax_ht.axvline(mode, c="r")
-    ax_ht.set_title("Mode = {}".format(mode))
-    ax_ht.set_xscale("log")
-    return fig, (ax_im, ax_ht)
+# def show_frame_and_mode(lazy_data, frame_num=-1):
+#     """Show a given frame with a histogram of values and the mode"""
+#     frame = v[frame_num].compute()
+#     fig, (ax_im, ax_ht) = plt.subplots(1, 2, figsize=(8, 4))
+#     ax_im.matshow(frame, vmax=300, cmap="inferno")
+#     ax_im.grid("off")
+#     ax_im.set_title(k)
+#     ax_ht.hist(frame.ravel(), bins=np.logspace(2, 3, 128), log=True)
+#     mode = np.bincount(frame[:128, -128:].ravel()).argmax()
+#     ax_ht.axvline(mode, c="r")
+#     ax_ht.set_title("Mode = {}".format(mode))
+#     ax_ht.set_xscale("log")
+#     return fig, (ax_im, ax_ht)
 
 
 class cached_property(object):
@@ -519,11 +527,12 @@ class PALMData(object):
 
     @cached_property
     def raw_frame(self):
-        """"""
+        """Make a groupby object that is by frame"""
         return self.processed.groupby("frame")
 
     @cached_property
     def raw_counts(self):
+        """Number of localizations per frame, not filtering"""
         return self.raw_frame.x0.count()
 
 
