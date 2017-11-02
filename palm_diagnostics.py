@@ -31,6 +31,10 @@ from skimage.filters import threshold_otsu, threshold_yen
 # need ndimage
 import scipy.ndimage as ndi
 
+from dphutils import mode
+from scipy.optimize import curve_fit
+from pyPALM.drift import remove_xy_mean, calc_drift, calc_fiducial_stats, extract_fiducials, plot_stats
+
 # for fast hist
 from numpy.core import atleast_1d, atleast_2d
 from numba import njit
@@ -39,7 +43,8 @@ from scipy.spatial import cKDTree
 
 def peakselector_df(path, verbose=False):
     """Read a peakselector file into a pandas dataframe"""
-    print("Reading {} into memory ... ".format(path))
+    if verbose:
+        print("Reading {} into memory ... ".format(path))
     sav = readsav(path, verbose=verbose)
     # pull out cgroupparams, set the byteorder to native and set the rownames
     df = pd.DataFrame(sav["cgroupparams"].byteswap().newbyteorder(), columns=sav["rownames"].astype(str))
@@ -304,9 +309,7 @@ class RawImages(object):
         last_frames = last_frames_temp = np.median(self.raw[frames], 0)
         for i in range(iters):
             init_mask = last_frames_temp > threshold_yen(last_frames_temp)
-            last_frames_temp = last_frames_temp * (~init_mask)
-        
-
+            last_frames_temp[~init_mask] = mode(last_frames_temp.astype(int))
         
         # the beads/fiducials are high, so we want to negate here
         mask = ~ndi.binary_dilation(init_mask, **dilation_kwargs)
@@ -334,7 +337,7 @@ class RawImages(object):
         self.mask = mask
 
 
-    @property
+    @cached_property
     def shape(self):
         return self.raw.shape
 
@@ -342,6 +345,11 @@ class RawImages(object):
     def mean(self):
         """return the mean of lazy_data"""
         return self.raw.mean((1, 2)).compute(get=dask.multiprocessing.get)
+
+    @cached_property
+    def mean_img(self):
+        """return the mean of lazy_data"""
+        return self.raw.mean(0).compute(get=dask.multiprocessing.get)
 
     @cached_property
     def masked_mean(self):
@@ -366,7 +374,41 @@ class RawImages(object):
                 s = self.mask
         else:
             s = slice(None)
-        return np.median(self.raw[-num_frames:], 0)[s].mean()
+        self.median_frames = np.median(self.raw[-num_frames:], 0)
+        return self.median_frames[s].mean()
+
+
+def auto_z(palm_df, min_dist=0, max_dist=np.inf, nbins=256, diagnostics=False):
+    """Automatically find good limits for z"""
+    # make histogram
+    hist, bins = np.histogram(palm_df.z0, bins=nbins)
+    # calculate center of bins
+    z = np.diff(bins)/2 +bins[:-1]
+    # find the max z
+    max_z = z[hist.argmax()]
+    # calculate where the first derivative changes sign
+    grad = np.gradient(np.sign(np.gradient(hist)))
+    # where the sign goes from negative to positive
+    # is where minima are located
+    concave = np.where(grad ==1)[0]
+    # order minima according to distance from max
+    i = np.diff(np.sign((z[concave] - max_z))).argmax()
+    # the two closest are our best bets
+    z_mins = z[concave[i:i+2]]
+    # enforce limits
+    z_mins_min = np.array((-max_dist, min_dist)) + max_z
+    z_mins_max = np.array((-min_dist, max_dist)) + max_z
+    z_mins = np.clip(z_mins, z_mins_min, z_mins_max)
+    # a diagnostic graph for testing
+    if diagnostics:
+        fig, (ax0, ax1, ax2) = plt.subplots(3, figsize=(4, 8), sharex=True)
+        ax0.fill_between(z, hist, interpolate=False)
+        ax1.plot(z, np.gradient(hist))
+        ax2.plot(z, grad)
+        for zz in z_mins:
+            ax0.axvline(zz, color="r")
+            
+    return z_mins
 
 
 class PALMData(object):
@@ -416,9 +458,6 @@ class PALMData(object):
         # normalize column names
         self.processed = self.processed.rename(columns=self.peak_col)
         self.grouped = self.grouped.rename(columns=self.group_col)
-        # initialize filtered ones
-        self.processed_filtered = None
-        self.grouped_filtered = None
 
     def filter_peaks(self, offset=1000, sigma_max=3, nphotons=0, groupsize=5000):
         """Filter internal dataframes"""
@@ -427,8 +466,8 @@ class PALMData(object):
             filter_series = (
                 (df.offset > 0) & # we know that offset should be around this value.
                 (df.offset < offset) &
-                (df.sigmax < sigma_max) &
-                (df.sigmay < sigma_max) &
+                (df.sigma_x < sigma_max) &
+                (df.sigma_y < sigma_max) &
                 (df.nphotons > nphotons)
             )
             if "groupsize" in df.keys():
@@ -451,26 +490,24 @@ class PALMData(object):
         return df[['offset', 'amp', 'xpos', 'ypos', 'nphotons',
             'sigmax', 'sigmay', 'zpos']].hist(bins=128, figsize=(12, 12), log=True)
 
-
-    def filter_peaks(self, offset=1000, sigma_max=3, nphotons=0, groupsize=5000):
-        """Filter internal dataframes"""
+    def filter_z(self, min_z=None, max_z=None, **kwargs):
+        """Crop the z range of data"""
+        auto_min_z, auto_max_z = auto_z(self.grouped, **kwargs)
+        if min_z is None:
+            min_z = auto_min_z
+        if max_z is None:
+            max_z = auto_max_z
         for df_title in ("processed", "grouped"):
-            df = self.__dict__[df_title]
-            filter_series = (
-                (df.offset > 0) & # we know that offset should be around this value.
-                (df.offset < offset) &
-                (df.sigma_x < sigma_max) &
-                (df.sigma_y < sigma_max) &
-                (df.nphotons > nphotons)
-            )
-            if "groupsize" in df.keys():
-                filter_series &= df.groupsize < groupsize
-            self.__dict__[df_title + "_filtered"] = df[filter_series]
+            sub_title = "_filtered"
+            df = self.__dict__[df_title + sub_title]
+            filt = (df.z0 < max_z) & (df.z0 > min_z)
+            self.__dict__[df_title + sub_title] = df[filt]
 
-    def filter_peaks_and_beads(self, *args, **kwargs):
+    def filter_peaks_and_beads(self, peak_kwargs, fiducial_kwargs, filter_z_kwargs):
         """Filter individual localizations and remove fiducials"""
-        self.filter_peaks(*args)
-        self.remove_fiducials(**kwargs)
+        self.filter_peaks(**peak_kwargs)
+        self.remove_fiducials(**fiducial_kwargs)
+        self.filter_z(**filter_z_kwargs)
 
     def remove_fiducials(self, yx_shape, subsampling=1, exclusion_radius=1, **kwargs):
         # use processed to find fiducials.
@@ -478,11 +515,122 @@ class PALMData(object):
             self.__dict__[df_title] = remove_fiducials(self.processed, yx_shape, self.__dict__[df_title],
                                   exclusion_radius=exclusion_radius, **kwargs)
 
+    @cached_property
+    def raw_frame(self):
+        """"""
+        return self.processed.groupby("frame")
+
+    @cached_property
+    def raw_counts(self):
+        return self.raw_frame.x0.count()
+
+
+    def sigmas(self, filt="_filtered", frame=0):
+        """Plot sigmas"""
+        fig, axs = plt.subplots(2, 3, figsize=(3*4, 2*4), sharex="col")
+        
+        for sub_axs, dtype in zip(axs, ("processed", "grouped")):
+            df = self.__dict__[dtype + filt]
+            df = df[df.frame > frame]
+            for ax, attr, mult in zip(sub_axs, ("sigma_x", "sigma_y", "sigma_z"), (130, 130, 1)):
+                dat = (df[attr] * mult)
+                dat.hist(ax=ax, bins="auto", normed=True)
+                ax.set_title("{} $\{}$".format(dtype.capitalize(), attr))
+                add_line(ax, dat)
+                add_line(ax, dat, np.median, color=ax.lines[-1].get_color(), linestyle="--")
+                ax.legend(loc="best", frameon=True)
+                ax.set_yticks([])
+        
+        for ax in sub_axs:
+            ax.set_xlabel("Precision (nm)")
+        
+        fig.tight_layout()
+        
+        return fig, axs
+
+    def photons(self, filt="_filtered", frame=0):
+        fig, axs = plt.subplots(2, sharex=True, figsize=(4, 8))
+        for ax, dtype in zip(axs, ("processed", "grouped")):
+            df = self.__dict__[dtype + filt]
+            series = df[df.frame > frame]["nphotons"]
+            bins = np.logspace(np.log10(series.min()), np.log10(series.max()), 128)
+            series.hist(ax=ax, log=True, bins=bins)
+            ax.set_xscale("log")
+            # mean line
+            add_line(ax, series)
+            # median line
+            add_line(ax, series, np.median, color=ax.lines[-1].get_color(), linestyle="--")
+            ax.legend(frameon=True, loc="best")
+            ax.set_title(dtype.capitalize())
+        ax.set_xlabel("# of Photons")
+        fig.tight_layout
+        return fig, axs
+
+
+def exponent(xdata, amp, rate, offset):
+    """Utility function to fit nonlinearly"""
+    return amp * np.exp(rate * xdata) + offset
+
+
+class Data405(object):
+    
+    def __init__(self, path):
+        self.data = pd.read_csv(path, index_col=0, parse_dates=True)
+        self.data = self.data.rename(columns={k:k.split(" ")[0].lower() for k in self.data.keys()})
+        self.data['date_delta'] = (self.data.index - self.data.index.min())  / np.timedelta64(1,'D')
+
+    def fit(self, lower_limit):
+        # we know that the laser is subthreshold below 0.45 V and the max is 5 V, so we want to limit the data between these two
+        data_df = self.data
+        data_df_crop = data_df[(data_df.reactivation > lower_limit) & (data_df.reactivation < 5)].dropna()
+        self.popt, self.pcov = curve_fit(exponent, *data_df_crop[["date_delta", "reactivation"]].values.T)
+        data_df["fit"] = exponent(data_df["date_delta"], *self.popt)
+        self.fit_win = data_df_crop.index.min(), data_df_crop.index.max()
+        
+    def plot(self, ax=None, limits=True, lower_limit=0.45):
+        # this is fast so no cost
+        self.fit(lower_limit)
+        if ax is None:
+            fig, ax = plt.subplots()
+        self.data[["reactivation", "fit"]].plot(ax=ax)
+        ax.text(0.1, 0.5, "$y(t) = {:.3f} e^{{{:.3f}t}} + {:.3f}$".format(*self.popt), transform=ax.transAxes)
+        if limits:
+            for edge in self.fit_win:
+                ax.axvline(edge, color="r")
+
+
+### Fit Functions
+def weird(xdata, *args):
+    """Honestly this looks like saturation behaviour"""
+    res = np.zeros_like(xdata)
+    for a, b, c in zip(*(iter(args),) * 3):
+        res += a*(1 + b * xdata) ** c
+    return res
+
+
+def stretched_exp(xdata, a, b):
+    return a * np.exp(-xdata ** b)
+
+
+def multi_exp(xdata, *args):
+    """Power and exponent"""
+    odd = len(args) % 2
+    if odd:
+        offset = args[-1]
+    else:
+        offset = 0
+    res = np.ones_like(xdata) * offset
+    for i in range(0, len(args) - odd, 2):
+        a, k = args[i:i + 2]
+        res += a * np.exp(-k * xdata)
+    return res
+
 
 class PALMExperiment(object):
     """A simple class to organize our experimental data"""
 
-    def __init__(self, raw_or_paths_to_raw, path_to_sav, *args, verbose=True, init=False, **kwargs):
+    def __init__(self, raw_or_paths_to_raw, path_to_sav, path_to_405, verbose=False, init=False,
+                 timestep=0.0525, nofeedbackframes=250*1000,**kwargs):
         """To initialize the experiment we need to know where the raw data is
         and where the peakselector processed data is
         
@@ -495,33 +643,134 @@ class PALMExperiment(object):
             self.raw = raw_or_paths_to_raw
             
         # load peakselector data
-        self.palm = PALMData(path_to_sav, verbose=verbose)
+        try:
+            self.palm = PALMData(path_to_sav, verbose=verbose)
+        except TypeError:
+            # assume user has passed PALMData object
+            self.palm = path_to_sav
+
+        self.timestep = timestep
+        self.nofeedbackframes = nofeedbackframes
+
+        try:
+            self.activation = Data405(path_to_405)
+        except ValueError:
+            self.activation = path_to_405
 
         if init:
             self.palm.filter_peaks_and_beads(yx_shape=self.raw.shape[-2:])
-            self.raw.mean
+            self.masked_mean
 
-    def make_frame_report(self, **kwargs):
-        return make_report(self, "Frame", **kwargs)
+    def filter_peaks_and_beads(self, peak_kwargs=dict(), fiducial_kwargs=dict(), filter_z_kwargs=dict()):
+        """Filter individual localizations and remove fiducials"""
+        fiducial_kwargs.update(dict(
+            yx_shape=self.raw.shape[-2:],
+            cmap="inferno",
+            vmax=1000,
+            norm=PowerNorm(0.25)
+        ))
+        self.palm.filter_peaks_and_beads(peak_kwargs, fiducial_kwargs, filter_z_kwargs)
 
-    def make_group_report(self, **kwargs):
-        return make_report(self, "Grouped", **kwargs)
+
+    @cached_property
+    def masked_mean(self):
+        """The masked mean minus the masked background"""
+        return pd.Series(self.raw.masked_mean - self.raw.raw_bg(masked=True),
+                         np.arange(len(self.raw.masked_mean))*self.timestep, name="Raw Intensity")
+
+    def plot_drift(self, max_s=0.15, max_fid=10):
+        fid_dfs = extract_fiducials(self.palm.processed, find_fiducials(self.palm.processed, self.raw.shape[1:]), 1)
+        fid_stats, all_drift = calc_fiducial_stats(fid_dfs)
+        fid_stats = fid_stats.sort_values("sigma")
+        good_fid = fid_stats[fid_stats.sigma < max_s].iloc[:max_fid]
+        if not len(good_fid):
+            # if no fiducials survive, just use the best one.
+            good_fid = fid_stats.iloc[:1]
+
+        return plot_stats([fid_dfs[g] for g in good_fid.index], z_pix_size=1)
 
 
-def add_line(ax, data, func=np.mean, c="k", **kwargs):
+    @property
+    def nofeedback(self):
+        """The portion of the intensity decay that doesn't have feedback"""
+        return self.masked_mean.iloc[:self.nofeedbackframes]
+
+    @property
+    def feedback(self):
+        """the portion of the intensity decay that does have feedback"""
+        return self.masked_mean.iloc[self.nofeedbackframes:]
+
+    def plot_w_fit(self, title, ax=None, func=weird, p0=None):
+        if ax is None:
+            fig, ax = plt.subplots()
+        self.nofeedback.plot(loglog=True, ylim=[1, None], ax=ax)
+        # do fit
+        if p0 is None:
+            if func is weird:
+                p0 = (1e3, 1, -1, 1e2, 0.1, -1)
+                func_label = ("$y(t) = " + "+".join(["{:.3f} (1 + {:.3f} t)^{{{:.3f}}}"] * 2) + "$")
+
+        # do the fit
+        popt, pcov = curve_fit(func, self.nofeedback.index, self.nofeedback, p0=p0)
+        fit = func(self.nofeedback.index, *popt)
+        
+        # plot the fit
+        ax.plot(self.nofeedback.index, fit,
+                label=func_label.format(*popt))
+
+        # save the residuals in case we want them later
+        self.resid = self.nofeedback - fit
+        
+        ax.legend(frameon=True, loc="lower center")
+        ax.set_ylabel("Mean Intensity")
+        ax.set_xlabel("Time (s)")
+        ax.set_title(title)
+
+    def plot_all(self):
+        fig, axs = plt.subplots(3, figsize=(6, 10))
+        (ax0, ax1, ax2) = axs
+        ax0.get_shared_x_axes().join(ax0, ax1)
+        self.feedback.plot(ax=ax0)
+        self.feedback.rolling(1000, 0, center=True).mean().plot(ax=ax0)
+        # normalize index
+        raw_counts = self.palm.raw_counts.loc[self.nofeedbackframes:]
+        raw_counts.index = raw_counts.index * self.timestep
+        # plot data and rolling average
+        raw_counts.plot(ax=ax1)
+        raw_counts.rolling(1000, 0, center=True).mean().plot(ax=ax1)
+        self.activation.plot(ax=ax2, limits=False)
+
+        for ax in (ax0, ax1):
+            ax.set_xticklabels([])
+            ax.set_xlabel("")
+
+        ax0.set_ylabel("Average Frame Intensity\n(Background Subtracted)")
+        ax1.set_ylabel("Raw Localizations\nPer Frame (with Fiducials)")
+        ax2.set_ylabel("405 Voltage (V)")
+
+        ax0.set_title("Feedback Only")
+
+        fig.tight_layout()
+        return fig, (ax0, ax1, ax2)
+
+
+def add_line(ax, data, func=np.mean, fmt_str=":.0f", **kwargs):
     m = func(data)
     func_name = func.__name__.capitalize()
-    ax.axvline(m, color=c, label="{} = {:.3f}".format(func_name, m), **kwargs)
+    # use style colors if available
+    if "color" not in kwargs.keys():
+        if ax.lines or ax.patches:
+            c = next(ax._get_lines.prop_cycler)
+        else:
+            c = dict(color='r')
+        kwargs.update(c)
+    ax.axvline(m, label=("{} = {" + fmt_str + "}").format(func_name, m), **kwargs)
 
 
 def log_bins(data, nbins=128):
     minmax = np.nanmin(data), np.nanmax(data)
     logminmax = np.log10(minmax)
     return np.logspace(*logminmax, num=nbins)
-
-
-
-
 
 ### Fast histogram stuff
 
