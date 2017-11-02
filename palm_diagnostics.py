@@ -344,12 +344,12 @@ class RawImages(object):
     @cached_property
     def mean(self):
         """return the mean of lazy_data"""
-        return self.raw.mean((1, 2)).compute(get=dask.multiprocessing.get)
+        return self.raw.astype(float).mean((1, 2)).compute(get=dask.multiprocessing.get)
 
     @cached_property
     def mean_img(self):
         """return the mean of lazy_data"""
-        return self.raw.mean(0).compute(get=dask.multiprocessing.get)
+        return self.raw.astype(float).mean(0).compute(get=dask.multiprocessing.get)
 
     @cached_property
     def masked_mean(self):
