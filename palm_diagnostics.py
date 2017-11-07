@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 # regular plotting
 import matplotlib.pyplot as plt
+import matplotlib.cm
 from matplotlib.colors import LogNorm, PowerNorm
 
 # data loading
@@ -15,6 +16,7 @@ from skimage.external import tifffile as tif
 
 # get multiprocessing support
 import dask
+import dask.array
 from dask.diagnostics import ProgressBar
 import dask.multiprocessing
 
@@ -31,7 +33,7 @@ from skimage.filters import threshold_otsu, threshold_triangle
 # need ndimage
 import scipy.ndimage as ndi
 
-from dphutils import mode
+from dphutils import mode, _calc_pad, scale
 from scipy.optimize import curve_fit
 from pyPALM.drift import remove_xy_mean, calc_drift, calc_fiducial_stats, extract_fiducials, plot_stats
 
@@ -398,6 +400,11 @@ def auto_z(palm_df, min_dist=0, max_dist=np.inf, nbins=256, diagnostics=False):
     max_z = z[hist.argmax()]
     # calculate where the first derivative changes sign
     grad = np.gradient(np.sign(np.gradient(hist)))
+    if diagnostics:
+        fig, (ax0, ax1, ax2) = plt.subplots(3, figsize=(4, 8), sharex=True)
+        ax0.fill_between(z, hist, interpolate=False)
+        ax1.plot(z, np.gradient(hist))
+        ax2.plot(z, grad)
     # where the sign goes from negative to positive
     # is where minima are located
     concave = np.where(grad ==1)[0]
@@ -411,10 +418,6 @@ def auto_z(palm_df, min_dist=0, max_dist=np.inf, nbins=256, diagnostics=False):
     z_mins = np.clip(z_mins, z_mins_min, z_mins_max)
     # a diagnostic graph for testing
     if diagnostics:
-        fig, (ax0, ax1, ax2) = plt.subplots(3, figsize=(4, 8), sharex=True)
-        ax0.fill_between(z, hist, interpolate=False)
-        ax1.plot(z, np.gradient(hist))
-        ax2.plot(z, grad)
         for zz in z_mins:
             ax0.axvline(zz, color="r")
             
@@ -502,7 +505,11 @@ class PALMData(object):
 
     def filter_z(self, min_z=None, max_z=None, **kwargs):
         """Crop the z range of data"""
-        auto_min_z, auto_max_z = auto_z(self.grouped, **kwargs)
+        if len(self.grouped):
+            df = self.grouped
+        else:
+            df = self.processed
+        auto_min_z, auto_max_z = auto_z(df, **kwargs)
         if min_z is None:
             min_z = auto_min_z
         if max_z is None:
@@ -1000,6 +1007,179 @@ def fast_hist3d(sample, bins, myrange=None, weights=None):
     else:
         hist = jit_hist3d(*Ncount, shape=shape)
     return hist, edges
+
+### Gaussian Rendering
+_jit_calc_pad = njit(_calc_pad, nogil=True)
+
+@njit(nogil=True)
+def _jit_slice_maker(xs1, ws1):
+    """Modified from the version in dphutils to allow jitting"""
+    if np.any(ws1 < 0):
+        raise ValueError("width cannot be negative")
+    # ensure integers
+    xs = np.rint(xs1).astype(np.int32)
+    ws = np.rint(ws1).astype(np.int32)
+    # use _calc_pad
+    toreturn = []
+    for x, w in zip(xs, ws):
+        half2, half1 = _jit_calc_pad(0, w)
+        xstart = x - half1
+        xend = x + half2
+        assert xstart <= xend, "xstart > xend"
+        if xend <= 0:
+            xstart, xend = 0, 0
+        # the max calls are to make slice_maker play nice with edges.
+        toreturn.append((max(0, xstart), xend))
+    # return a list of slices
+    return toreturn
+
+def _gauss(yw, xw, y0, x0, sy, sx):
+    """Simple normalized 2D gaussian function for rendering"""
+    # for this model, x and y are seperable, so we can generate
+    # two gaussians and take the outer product
+    y, x = np.arange(yw), np.arange(xw)
+    amp = 1 / (2 * np.pi * sy * sx)
+    return amp * np.outer(np.exp(-((y-y0)/sy) ** 2 / 2), np.exp(-((x-x0)/sx) ** 2 / 2))
+
+_jit_gauss = njit(_gauss, nogil=True)
+
+
+def _gen_img_sub(yx_shape, params, mag=10, multipliers=np.array(())):
+    """A sub function for actually rendering the images
+    Some of the structure is not really 'pythonic' but its to allow JIT compilation
+
+    Parameters
+    ----------
+    yx_shape : tuple
+        The shape overwhich to render the scene
+    params : ndarray (M x N)
+        An array containing M localizations with data ordered as
+        y0, x0, sigma_y, sigma_x
+    mag : int
+        The magnification factor to render the scene
+    multipliers : array (M) optional
+        an array of multipliers so that you can do weigthed averages
+        mainly to be used for depth coded MIPs
+
+    Returns
+    -------
+    img : ndarray
+        The rendered image
+    """
+    # hard coded radius, this is really how many sigmas you want
+    # to use to render each gaussian
+    radius = 5
+    yw, xw = yx_shape
+    # initialize the image
+    img = np.zeros((yw * mag, xw * mag))
+    # iterate through all localizations
+    for i in range(len(params)):
+        # pull parameters
+        y0, x0, sy, sx = params[i]
+        # adjust to new magnification
+        y0, x0, sy, sx = np.array((y0, x0, sy, sx)) * mag
+        # calculate the render window size
+        width = np.array((sy, sx)) * radius
+        # calculate the area in the image
+        (ystart, yend), (xstart, xend) = _jit_slice_maker(np.array((y0, x0)), width)
+        # adjust coordinates to window coordinates
+        y0 -= ystart
+        x0 -= xstart
+        # generate gaussian
+        g = _jit_gauss((yend - ystart), (xend - xstart), y0, x0, sy, sx)
+        # weight if requested
+        if len(multipliers):
+            g *= multipliers[i]
+        # update image
+        img[ystart:yend, xstart:xend] += g
+        
+    return img
+
+_jit_gen_img_sub = njit(_gen_img_sub, nogil=True)
+
+
+def _gen_img_sub_threaded(yx_shape, df, mag=10, multipliers=np.array(()), numthreads=1):
+    keys_for_render = ["y0", "x0", "sigma_y", "sigma_x"]
+    df = df[keys_for_render]
+    length = len(df)
+    chunklen = (length + numthreads - 1) // numthreads
+    # Create argument tuples for each input chunk
+    df_chunks = [df.iloc[i * chunklen:(i + 1) * chunklen] for i in range(numthreads)]
+    mult_chunks = [multipliers[i * chunklen:(i + 1) * chunklen] for i in range(numthreads)]
+    lazy_result = [dask.delayed(_jit_gen_img_sub)(yx_shape, df_chunk.values, mag, mult)
+                               for df_chunk, mult in zip(df_chunks, mult_chunks)]
+    lazy_result = dask.array.stack([dask.array.from_delayed(l, np.array(yx_shape) * mag, np.float)
+        for l in lazy_result])
+    return lazy_result.sum(0)
+    
+
+def gen_img(yx_shape, df, mag=10, cmap="hsv", weight="amp", numthreads=1):
+    """Generate a 2D image, optionally with z color coding
+
+    Parameters
+    ----------
+    yx_shape : tuple
+        The shape overwhich to render the scene
+    df : DataFrame
+        A DataFrame object containing localization data
+    mag : int
+        The magnification factor to render the scene
+    cmap : "hsv"
+        The color coding for the z image, if set to None, only 2D
+        will be rendered
+    weight : str
+        The key with which to weight the z image, valid options are
+        "amp" and "nphotons"
+    numthreads : int
+        The number of threads to use during rendering. (Experimental)
+
+    Returns
+    -------
+    img : ndarray
+        If no cmap is specified then the result is a 2D array
+        If a cmap is specified then the result is a 3D array where
+        the last axis is RGBA. the A channel is just the intensity
+        It will not have gamma or clipping applied.
+    """
+    # Generate the intensity image
+    img = _gen_img_sub_threaded(yx_shape, df, mag, 1 / np.sqrt(2 * np.pi) / df["sigma_z"].values, numthreads)
+    if cmap is not None:
+        # calculate the weighting for each localization
+        w = df[weight] / df["sigma_z"]
+        # normalize z into the range of 0 to 1
+        norm_z = scale(df["z0"].values)
+        # Calculate weighted colors for each z position
+        wz = (w.values[:, None] * matplotlib.cm.get_cmap(cmap)(norm_z))
+        # generate the weighted r, g, anb b images
+        img_wz_r = _gen_img_sub_threaded(yx_shape, df, mag, multipliers=wz[:, 0], numthreads=numthreads)
+        img_wz_g = _gen_img_sub_threaded(yx_shape, df, mag, multipliers=wz[:, 1], numthreads=numthreads)
+        img_wz_b = _gen_img_sub_threaded(yx_shape, df, mag, multipliers=wz[:, 2], numthreads=numthreads)
+        img_w = _gen_img_sub_threaded(yx_shape, df, mag, multipliers=w.values, numthreads=numthreads)
+        # combine the images and divide by weights to get a depth-coded RGB image
+        rgb = dask.array.dstack((img_wz_r, img_wz_g, img_wz_b)) / img_w[..., None]
+        # add on the alpha img
+        rgba = dask.array.dstack((rgb, img))
+        return rgba.compute()
+    else:
+        # just return the alpha.
+        return img.compute()
+
+
+@dask.delayed()
+def _gen_zplane(df, yx_shape, zplane, mag=10):
+    """"""
+    radius = 5
+    df_zplane = df[np.abs(df.z0 - zplane) < df.sigma_z * radius]
+    amps = np.exp(-((df_zplane.z0 - zplane) / df_zplane.sigma_z) ** 2 / 2) /(np.sqrt(2 * np.pi) * df_zplane.sigma_z)
+    return _jit_gen_img_sub(yx_shape, df_zplane[["y0", "x0", "sigma_y", "sigma_x"]].values, mag, amps.values)
+
+
+def gen_img_3d(df, yx_shape, zplanes, mag=10):
+    """"""
+    new_shape = np.array(yx_shape) * mag
+    to_compute = dask.array.stack([dask.array.from_delayed(_gen_zplane(df, yx_shape, zplane, mag), new_shape, np.float)
+                                   for zplane in zplanes])
+    return to_compute.compute()
 
 
 def measure_peak_widths(y):
