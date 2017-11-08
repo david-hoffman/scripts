@@ -1079,7 +1079,7 @@ def _gen_img_sub(yx_shape, params, mag=10, multipliers=np.array(())):
         # adjust to new magnification
         y0, x0, sy, sx = np.array((y0, x0, sy, sx)) * mag
         # calculate the render window size
-        width = np.array((sy, sx)) * radius
+        width = np.array((sy, sx)) * radius * 2
         # calculate the area in the image
         (ystart, yend), (xstart, xend) = _jit_slice_maker(np.array((y0, x0)), width)
         # adjust coordinates to window coordinates
@@ -1165,20 +1165,37 @@ def gen_img(yx_shape, df, mag=10, cmap="hsv", weight="amp", numthreads=1):
         return img.compute()
 
 
-@dask.delayed()
-def _gen_zplane(df, yx_shape, zplane, mag=10):
-    """"""
+@dask.delayed
+def _gen_zplane(yx_shape, df, zplane, mag=10):
+    """A subfunction to generate a single z plane"""
+    # again a hard coded radius
     radius = 5
+    # find the fiducials worth rendering
     df_zplane = df[np.abs(df.z0 - zplane) < df.sigma_z * radius]
+    # calculate the amplitude of the z gaussian.
     amps = np.exp(-((df_zplane.z0 - zplane) / df_zplane.sigma_z) ** 2 / 2) /(np.sqrt(2 * np.pi) * df_zplane.sigma_z)
+    # generate a 2D image weighted by the z gaussian.
     return _jit_gen_img_sub(yx_shape, df_zplane[["y0", "x0", "sigma_y", "sigma_x"]].values, mag, amps.values)
 
 
-def gen_img_3d(df, yx_shape, zplanes, mag=10):
-    """"""
-    new_shape = np.array(yx_shape) * mag
-    to_compute = dask.array.stack([dask.array.from_delayed(_gen_zplane(df, yx_shape, zplane, mag), new_shape, np.float)
-                                   for zplane in zplanes])
+def gen_img_3d(yx_shape, df, zplanes, mag=10):
+    """Generate a 3D image with gaussian point clouds
+
+    Parameters
+    ----------
+    yx_shape : tuple
+        The shape overwhich to render the scene
+    df : DataFrame
+        A DataFrame object containing localization data
+    zplanes : array
+        The planes at which the user wishes to render
+    mag : int
+        The magnification factor to render the scene"""
+    new_shape = tuple(np.array(yx_shape) * mag)
+    # print(dask.array.from_delayed(_gen_zplane(df, yx_shape, zplanes[0], mag), new_shape, np.float))
+    rendered_planes = [dask.array.from_delayed(_gen_zplane(yx_shape, df, zplane, mag), new_shape, np.float)
+                                   for zplane in zplanes]
+    to_compute = dask.array.stack(rendered_planes)
     return to_compute.compute()
 
 
