@@ -1200,7 +1200,18 @@ def gen_img_3d(yx_shape, df, zplanes, mag=10):
 
 
 def measure_peak_widths(y):
-    """Assumes binary data"""
+    """Measure peak widths in thresholded data. 
+
+    Parameters
+    ----------
+    y : iterable (ndarray, 1d)
+        binary data
+
+    Returns
+    -------
+    widths : ndarray, 1d
+        Measured widths of the peaks.
+    """
     d = np.diff(y)
     i = np.arange(len(d))
     rising_edges = i[d > 0]
@@ -1229,6 +1240,7 @@ def measure_peak_widths(y):
 
 
 def count_blinks(offtimes, gap):
+    """"""
     breaks = np.nonzero(offtimes > gap)[0]
     if breaks.size:
         blinks = [offtimes[breaks[i] + 1:breaks[i+1]] for i in range(breaks.size - 1)]
