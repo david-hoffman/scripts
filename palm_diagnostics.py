@@ -3,6 +3,7 @@
 # The basic experiment being analyzed here is data that has been reactivated and deactivated multiple times.
 
 import gc
+import json
 import numpy as np
 import pandas as pd
 # regular plotting
@@ -33,6 +34,7 @@ from skimage.filters import threshold_otsu, threshold_triangle
 # need ndimage
 import scipy.ndimage as ndi
 
+from scipy.misc import imsave
 from dphutils import mode, _calc_pad, scale
 from scipy.optimize import curve_fit
 from pyPALM.drift import remove_xy_mean, calc_drift, calc_fiducial_stats, extract_fiducials, plot_stats
@@ -807,8 +809,8 @@ def choose_dtype(max_value):
     return np.float32
 
 def tif_convert(data):
-    """convert data for saving as tiff"""
-    return data.astype(choose_dtype(data.max()))
+    """convert data for saving as tiff copying if necessary"""
+    return data.astype(choose_dtype(data.max()), copy=False)
 
 ### Fast histogram stuff
 
@@ -1165,6 +1167,85 @@ def gen_img(yx_shape, df, mag=10, cmap="hsv", weight="amp", numthreads=1):
         return img.compute()
 
 
+class DepthCodedImage(object):
+    """A specialty class to handel depth coded images, especially saving and displaying"""
+
+    def __init__(self, data, cmap, mag, zrange):
+        """"""
+        self.data = data
+        self.cmap = cmap
+        self.mag = mag
+        self.zrange = zrange
+        
+    def save(self, savepath):
+        """Save data and metadata to a tif file"""
+        info_dict = dict(
+                cmap=self.cmap,
+                mag=self.mag,
+                zrange=self.zrange
+            )
+
+        tif_kwargs = dict(compress=6, imagej=True, resolution=(mag, mag),
+            metadata=dict(
+                # let's stay agnostic to units for now
+                unit="pixel",
+                # dump info_dict into string
+                info=json.dumps(info_dict)
+                )
+            )
+
+        tif.imsave(fix_ext(savepath, ".tif"), tif_convert(self.data), **tif_kwargs)
+
+    @classmethod
+    def load(cls, path):
+        """Load previously saved data"""
+        with tif.TiffFile(path) as file:
+            data = file.asarray()
+            info_dict = json.loads(file.pages[0].imagej_tags["info"])
+        return cls(data, **info_dict)
+
+    @property
+    def RGB(self):
+        """Return the rgb channels of the image"""
+        return self.data[..., :3]
+
+    @property
+    def alpha(self):
+        """Return the alpha channel of the image"""
+        return self.data[..., 3]
+
+    def __array__(self):
+        """This makes sure that the user can use data most places a numpy array would work"""
+        return self.data
+
+    def _norm_data(self, alpha=False, **kwargs):
+        """"""
+        # power norm will normalize alpha to 0 to 1 after applying
+        # a gamma correction and limiting data to vmin and vmax
+        new_alpha = PowerNorm(**kwargs)(self.alpha)
+        if alpha:
+            new_data = np.dstack((self.RGB, new_alpha))
+        else:
+            new_data = self.RGB * new_alpha[:, None]
+        return new_data
+
+
+    def save_color(self, savepath, alpha=False, **kwargs):
+        # normalize path name to make sure that it end's in .tif
+        norm_data = self._norm_data(alpha, **kwargs)
+
+        ext = os.path.splitext(savepath)[1]
+        if ext.lower() == ".tif":
+            img16bit = (norm_data * 65535).astype(np.uint16)
+            DepthCodedImage(img16bit, self.cmap, self.mag, self.zrange).save(savepath)
+        else:
+            img8bit = (norm_data * 255).astype(np.uint8)
+            imsave(savepath, img8bit)
+        
+    def plot(self, interactive):
+        """"""
+        raise NotImplementedError
+
 @dask.delayed()
 def _gen_zplane(df, yx_shape, zplane, mag=10):
     """"""
@@ -1180,6 +1261,61 @@ def gen_img_3d(df, yx_shape, zplanes, mag=10):
     to_compute = dask.array.stack([dask.array.from_delayed(_gen_zplane(df, yx_shape, zplane, mag), new_shape, np.float)
                                    for zplane in zplanes])
     return to_compute.compute()
+
+
+def save_img_3d(yx_shape, df, savepath, zspacing=None, zplanes=None, mag=10, **kwargs):
+    """Generates and saves a gaussian rendered 3D image along with the relevant metadata in a tif stack
+
+    Parameters
+    ----------
+    yx_shape : tuple
+        The shape overwhich to render the scene
+    df : DataFrame
+        A DataFrame object containing localization data
+    savepath : str
+        the path to save the file in.
+    mag : int
+        The magnification factor to render the scene
+    """
+    # figure out the zplanes to calculate
+    if zplanes is None:
+        if zspacing is None:
+            raise ValueError("zspacing or zplanes must be specified")
+        zplanes = np.arange(df.z0.min() - zspacing / 2, df.z0.max() + zspacing / 2, zspacing)
+
+    # generate the actual image
+    img3d = gen_img_3d(yx_shape, df, zplanes, mag)
+
+    # save kwargs
+    tif_kwargs = dict(compress=6, imagej=True, resolution=(mag, mag),
+        metadata=dict(
+            # spacing is the depth spacing for imagej
+            spacing=zspacing,
+            # let's stay agnostic to units for now
+            unit="pixel",
+            # we want imagej to interpret the image as a z-stack
+            # so set slices to the length of the image
+            slices=len(img3d),
+            # This information is mostly redundant with "spacing" but is included
+            # incase one wanted to render arbitrarily spaced planes.
+            labels=["z = {}".format(zplane) for zplane in zplane],
+            )
+        )
+
+    # incase user wants to change anything
+    tif_kwargs.update(kwargs)
+
+    # save the tif
+    tif.imsave(fix_ext(savepath, ".tif"), tif_convert(img3d), **tif_kwargs)
+
+    # return data to user for further processing.
+    return img3d
+
+
+def fix_ext(path, ext):
+    if os.path.splitext(path)[1].lower() != ext.lower():
+        path += ext
+    return path
 
 
 def measure_peak_widths(y):

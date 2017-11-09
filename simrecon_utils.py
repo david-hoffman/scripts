@@ -1490,7 +1490,7 @@ def process_txt_output(txt_buffer):
                           flags=re.M)
     # parse output
     my_dirs = set(re.findall(ndir_re, txt_buffer))
-    assert len(my_dirs) == 1
+    assert len(my_dirs) == 1, my_dirs
     ndirs = int(list(my_dirs)[0])
     my_angles = np.array(re.findall(angle_re, txt_buffer)).astype(float)
     my_mags = np.array(re.findall(mag_re, txt_buffer)).astype(float)
@@ -1512,7 +1512,7 @@ def plot_params(angles, mags, amps, phases):
     norients = angles.shape[-1]
     fig, axs = plt.subplots(4, norients, figsize=(norients * 4, 4 * 4))
     for row, data, t, c in zip(axs, (angles, mags, amps, phases),
-                            titles, ('gnuplot2', 'gnuplot2', 'gnuplot2', 'seismic')):
+                            titles, ('viridis', 'viridis', 'viridis', 'seismic')):
         for i, ax in enumerate(row):
             # if angles we don't want absolute values.
             if 'Angles' in t:
