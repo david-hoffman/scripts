@@ -9,7 +9,9 @@ import pandas as pd
 # regular plotting
 import matplotlib.pyplot as plt
 import matplotlib.cm
-from matplotlib.colors import LogNorm, PowerNorm
+from matplotlib.colors import LogNorm, PowerNorm, ListedColormap
+import matplotlib.font_manager as fm
+from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
 
 # data loading
 from scipy.io import readsav
@@ -44,6 +46,8 @@ from numpy.core import atleast_1d, atleast_2d
 from numba import njit
 from scipy.spatial import cKDTree
 
+
+greys_alpha_cm = ListedColormap([(i / 255,) * 3 + ((255 - i) / 255,) for i in range(256)])
 
 def peakselector_df(path, verbose=False):
     """Read a peakselector file into a pandas dataframe"""
@@ -1167,16 +1171,30 @@ def gen_img(yx_shape, df, mag=10, cmap="hsv", weight="amp", numthreads=1):
         return img.compute()
 
 
-class DepthCodedImage(object):
-    """A specialty class to handel depth coded images, especially saving and displaying"""
+class DepthCodedImage(np.ndarray):
+    """A specialty class to handle depth coded images, especially saving and displaying"""
 
-    def __init__(self, data, cmap, mag, zrange):
-        """"""
-        self.data = data
-        self.cmap = cmap
-        self.mag = mag
-        self.zrange = zrange
-        
+    def __new__(cls, data, cmap, mag, zrange):
+        # from https://docs.scipy.org/doc/numpy-1.13.0/user/basics.subclassing.html
+        # Input array is an already formed ndarray instance
+        # We first cast to be our class type
+        obj = np.asarray(data).view(cls)
+        # add the new attribute to the created instance
+        obj.cmap = cmap
+        obj.mag = mag
+        obj.zrange = zrange
+        # Finally, we must return the newly created object:
+        return obj
+
+    def __array_finalize__(self, obj):
+        # see InfoArray.__array_finalize__ for comments
+        if obj is None:
+            return
+        self.cmap = getattr(obj, 'cmap', None)
+        self.mag = getattr(obj, 'mag', None)
+        self.zrange = getattr(obj, 'zrange', None)
+
+
     def save(self, savepath):
         """Save data and metadata to a tif file"""
         info_dict = dict(
@@ -1207,26 +1225,24 @@ class DepthCodedImage(object):
     @property
     def RGB(self):
         """Return the rgb channels of the image"""
-        return self.data[..., :3]
+        return np.asarray(self)[..., :3]
 
     @property
     def alpha(self):
         """Return the alpha channel of the image"""
-        return self.data[..., 3]
-
-    def __array__(self):
-        """This makes sure that the user can use data most places a numpy array would work"""
-        return self.data
+        return np.asarray(self)[..., 3]
 
     def _norm_data(self, alpha=False, **kwargs):
         """"""
         # power norm will normalize alpha to 0 to 1 after applying
         # a gamma correction and limiting data to vmin and vmax
-        new_alpha = PowerNorm(**kwargs)(self.alpha)
+        pkwargs = dict(gamma=1, clip=True)
+        pkwargs.update(kwargs)
+        new_alpha = PowerNorm(**pkwargs)(self.alpha)
         if alpha:
             new_data = np.dstack((self.RGB, new_alpha))
         else:
-            new_data = self.RGB * new_alpha[:, None]
+            new_data = self.RGB * new_alpha[..., None]
         return new_data
 
 
@@ -1242,9 +1258,31 @@ class DepthCodedImage(object):
             img8bit = (norm_data * 255).astype(np.uint8)
             imsave(savepath, img8bit)
         
-    def plot(self, interactive):
+    def plot(self, pixel_size=0.13, unit="nm", scalebar_size=None, subplots_kwargs=dict()):
         """"""
-        raise NotImplementedError
+        fig, ax = plt.subplots(**subplots_kwargs)
+        cbar = ax.matshow(np.linspace(self.zrange[0], self.zrange[1], 256).reshape(16, 16), cmap=self.cmap)
+        ax.imshow(img[..., :3], interpolation=None)
+        ax.matshow(img[..., 3], norm=pdiag.PowerNorm(1), cmap=greys_alpha_cm)
+        fig.colorbar(cbar, label="z ({})".format(unit))
+        if scalebar_size:
+            scalebar_length = scalebar_size * mag / pixel_size
+            default_scale_bar_kwargs = dict(
+                loc='lower left',
+                color='white',
+                frameon=False,
+                size_vertical=scalebar_length/10
+                fontproperties=fm.FontProperties(size="large", weight="bold")
+            )
+            scalebar = AnchoredSizeBar(ax.transData,
+                                       scalebar_length,
+                                       '{} μm'.format(scalebar_size),
+                                       )
+
+            ax.add_artist(scalebar)
+        ax.set_axis_off()
+
+        return fig, ax
 
 
 @dask.delayed
