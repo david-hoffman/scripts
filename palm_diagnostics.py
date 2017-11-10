@@ -39,6 +39,7 @@ import scipy.ndimage as ndi
 
 from scipy.misc import imsave
 from dphutils import mode, _calc_pad, scale
+from dphplotting import auto_adjust
 from scipy.optimize import curve_fit
 from pyPALM.drift import remove_xy_mean, calc_drift, calc_fiducial_stats, extract_fiducials, plot_stats
 
@@ -49,6 +50,7 @@ from scipy.spatial import cKDTree
 
 
 greys_alpha_cm = ListedColormap([(i / 255,) * 3 + ((255 - i) / 255,) for i in range(256)])
+
 
 def peakselector_df(path, verbose=False):
     """Read a peakselector file into a pandas dataframe"""
@@ -799,6 +801,7 @@ def log_bins(data, nbins=128):
     logminmax = np.log10(minmax)
     return np.logspace(*logminmax, num=nbins)
 
+
 def choose_dtype(max_value):
     """choose the appropriate dtype for saving images"""
     # if any type of float, use float32
@@ -813,8 +816,10 @@ def choose_dtype(max_value):
         return np.uint32
     return np.float32
 
+
 def tif_convert(data):
     """convert data for saving as tiff copying if necessary"""
+    data = np.asarray(data)
     return data.astype(choose_dtype(data.max()), copy=False)
 
 ### Fast histogram stuff
@@ -1040,18 +1045,21 @@ def _jit_slice_maker(xs1, ws1):
     # return a list of slices
     return toreturn
 
+
 def _gauss(yw, xw, y0, x0, sy, sx):
     """Simple normalized 2D gaussian function for rendering"""
     # for this model, x and y are seperable, so we can generate
     # two gaussians and take the outer product
     y, x = np.arange(yw), np.arange(xw)
     amp = 1 / (2 * np.pi * sy * sx)
-    return amp * np.outer(np.exp(-((y-y0)/sy) ** 2 / 2), np.exp(-((x-x0)/sx) ** 2 / 2))
+    gy = np.exp(-((y - y0) / sy) ** 2 / 2)
+    gx = np.exp(-((x - x0) / sx) ** 2 / 2)
+    return amp * np.outer(gy, gx)
 
 _jit_gauss = njit(_gauss, nogil=True)
 
 
-def _gen_img_sub(yx_shape, params, mag=10, multipliers=np.array(())):
+def _gen_img_sub(yx_shape, params, mag, multipliers, diffraction_limit):
     """A sub function for actually rendering the images
     Some of the structure is not really 'pythonic' but its to allow JIT compilation
 
@@ -1067,6 +1075,9 @@ def _gen_img_sub(yx_shape, params, mag=10, multipliers=np.array(())):
     multipliers : array (M) optional
         an array of multipliers so that you can do weigthed averages
         mainly to be used for depth coded MIPs
+    diffraction_limit : bool
+        Controls whether or not there is a lower limit for the localization precision
+        This can have better smoothing.
 
     Returns
     -------
@@ -1085,6 +1096,8 @@ def _gen_img_sub(yx_shape, params, mag=10, multipliers=np.array(())):
         y0, x0, sy, sx = params[i]
         # adjust to new magnification
         y0, x0, sy, sx = np.array((y0, x0, sy, sx)) * mag
+        if diffraction_limit:
+            sy, sx = max(sy, 0.5), max(sx, 0.5)
         # calculate the render window size
         width = np.array((sy, sx)) * radius * 2
         # calculate the area in the image
@@ -1105,7 +1118,7 @@ def _gen_img_sub(yx_shape, params, mag=10, multipliers=np.array(())):
 _jit_gen_img_sub = njit(_gen_img_sub, nogil=True)
 
 
-def _gen_img_sub_threaded(yx_shape, df, mag=10, multipliers=np.array(()), numthreads=1):
+def _gen_img_sub_threaded(yx_shape, df, mag, multipliers, diffraction_limit, numthreads=1):
     keys_for_render = ["y0", "x0", "sigma_y", "sigma_x"]
     df = df[keys_for_render]
     length = len(df)
@@ -1113,14 +1126,14 @@ def _gen_img_sub_threaded(yx_shape, df, mag=10, multipliers=np.array(()), numthr
     # Create argument tuples for each input chunk
     df_chunks = [df.iloc[i * chunklen:(i + 1) * chunklen] for i in range(numthreads)]
     mult_chunks = [multipliers[i * chunklen:(i + 1) * chunklen] for i in range(numthreads)]
-    lazy_result = [dask.delayed(_jit_gen_img_sub)(yx_shape, df_chunk.values, mag, mult)
+    lazy_result = [dask.delayed(_jit_gen_img_sub)(yx_shape, df_chunk.values, mag, mult, diffraction_limit)
                                for df_chunk, mult in zip(df_chunks, mult_chunks)]
     lazy_result = dask.array.stack([dask.array.from_delayed(l, np.array(yx_shape) * mag, np.float)
         for l in lazy_result])
     return lazy_result.sum(0)
     
 
-def gen_img(yx_shape, df, mag=10, cmap="hsv", weight="amp", numthreads=1):
+def gen_img(yx_shape, df, mag=10, cmap="gist_rainbow", weight="amp", diffraction_limit=False, numthreads=1):
     """Generate a 2D image, optionally with z color coding
 
     Parameters
@@ -1149,24 +1162,28 @@ def gen_img(yx_shape, df, mag=10, cmap="hsv", weight="amp", numthreads=1):
         It will not have gamma or clipping applied.
     """
     # Generate the intensity image
-    img = _gen_img_sub_threaded(yx_shape, df, mag, 1 / np.sqrt(2 * np.pi) / df["sigma_z"].values, numthreads)
+    w = 1 / (np.sqrt(2 * np.pi)) / df["sigma_z"]
+    img = _gen_img_sub_threaded(yx_shape, df, mag, w.values, numthreads)
     if cmap is not None:
         # calculate the weighting for each localization
-        w = df[weight] / df["sigma_z"]
+        if weight is not None:
+            w *= df[weight]
         # normalize z into the range of 0 to 1
         norm_z = scale(df["z0"].values)
         # Calculate weighted colors for each z position
         wz = (w.values[:, None] * matplotlib.cm.get_cmap(cmap)(norm_z))
         # generate the weighted r, g, anb b images
-        img_wz_r = _gen_img_sub_threaded(yx_shape, df, mag, multipliers=wz[:, 0], numthreads=numthreads)
-        img_wz_g = _gen_img_sub_threaded(yx_shape, df, mag, multipliers=wz[:, 1], numthreads=numthreads)
-        img_wz_b = _gen_img_sub_threaded(yx_shape, df, mag, multipliers=wz[:, 2], numthreads=numthreads)
-        img_w = _gen_img_sub_threaded(yx_shape, df, mag, multipliers=w.values, numthreads=numthreads)
+        args = yx_shape, df, mag
+        args2 = diffraction_limit, numthreads
+        img_wz_r = _gen_img_sub_threaded(*args, wz[:, 0], *args2)
+        img_wz_g = _gen_img_sub_threaded(*args, wz[:, 1], *args2)
+        img_wz_b = _gen_img_sub_threaded(*args, wz[:, 2], *args2)
+        img_w = _gen_img_sub_threaded(*args, w.values, *args2)
         # combine the images and divide by weights to get a depth-coded RGB image
         rgb = dask.array.dstack((img_wz_r, img_wz_g, img_wz_b)) / img_w[..., None]
         # add on the alpha img
         rgba = dask.array.dstack((rgb, img))
-        return rgba.compute()
+        return DepthCodedImage(rgba.compute(), cmap, mag, (df["z0"].min(), df["z0"].max()))
     else:
         # just return the alpha.
         return img.compute()
@@ -1195,7 +1212,6 @@ class DepthCodedImage(np.ndarray):
         self.mag = getattr(obj, 'mag', None)
         self.zrange = getattr(obj, 'zrange', None)
 
-
     def save(self, savepath):
         """Save data and metadata to a tif file"""
         info_dict = dict(
@@ -1209,11 +1225,12 @@ class DepthCodedImage(np.ndarray):
                 # let's stay agnostic to units for now
                 unit="pixel",
                 # dump info_dict into string
-                info=json.dumps(info_dict)
+                info=json.dumps(info_dict),
+                axes='YXC'
                 )
             )
 
-        tif.imsave(fix_ext(savepath, ".tif"), tif_convert(self.data), **tif_kwargs)
+        tif.imsave(fix_ext(savepath, ".tif"), tif_convert(self), **tif_kwargs)
 
     @classmethod
     def load(cls, path):
@@ -1246,43 +1263,61 @@ class DepthCodedImage(np.ndarray):
             new_data = self.RGB * new_alpha[..., None]
         return new_data
 
-
     def save_color(self, savepath, alpha=False, **kwargs):
         # normalize path name to make sure that it end's in .tif
-        norm_data = self._norm_data(alpha, **kwargs)
-
         ext = os.path.splitext(savepath)[1]
         if ext.lower() == ".tif":
-            img16bit = (norm_data * 65535).astype(np.uint16)
-            DepthCodedImage(img16bit, self.cmap, self.mag, self.zrange).save(savepath)
+            alpha = False
+        norm_data = self._norm_data(alpha, **kwargs)
+        img8bit = (norm_data * 255).astype(np.uint8)
+        if ext.lower() == ".tif":
+            DepthCodedImage(img8bit, self.cmap, self.mag, self.zrange).save(savepath)
         else:
-            img8bit = (norm_data * 255).astype(np.uint8)
             imsave(savepath, img8bit)
         
-    def plot(self, pixel_size=0.13, unit="nm", scalebar_size=None, subplots_kwargs=dict()):
-        """"""
+    def plot(self, pixel_size=0.13, unit="μm", scalebar_size=None, auto=False, subplots_kwargs=dict(), norm_kwargs=dict()):
+        """Make a nice plot of the data, with a scalebar"""
+        # make the figure and axes
         fig, ax = plt.subplots(**subplots_kwargs)
+        # make the colorbar plot
         cbar = ax.matshow(np.linspace(self.zrange[0], self.zrange[1], 256).reshape(16, 16), cmap=self.cmap)
-        ax.imshow(img[..., :3], interpolation=None)
-        ax.matshow(img[..., 3], norm=pdiag.PowerNorm(1), cmap=greys_alpha_cm)
+        # show the color data
+        ax.imshow(self.RGB, interpolation=None)
+        # normalize the alpha channel
+        nkwargs = dict(gamma=1, clip=True)
+        nkwargs.update(norm_kwargs)
+        new_alpha = PowerNorm(**nkwargs)(self.alpha)
+        # if auto is requested perform it
+        if auto:
+            vdict = auto_adjust(new_alpha)
+        else:
+            vdict = dict()
+        # overlay the alpha channel over the color image
+        ax.matshow(new_alpha, cmap=greys_alpha_cm, **vdict)
+        # add the colorbar
         fig.colorbar(cbar, label="z ({})".format(unit))
+        # add scalebar if requested
         if scalebar_size:
-            scalebar_length = scalebar_size * mag / pixel_size
+            # make sure the length makes sense in data units
+            scalebar_length = scalebar_size * self.mag / pixel_size
             default_scale_bar_kwargs = dict(
                 loc='lower left',
+                pad=0.5,
                 color='white',
                 frameon=False,
-                size_vertical=scalebar_length/10
+                size_vertical=scalebar_length / 10,
                 fontproperties=fm.FontProperties(size="large", weight="bold")
             )
             scalebar = AnchoredSizeBar(ax.transData,
                                        scalebar_length,
-                                       '{} μm'.format(scalebar_size),
+                                       '{} {}'.format(scalebar_size, unit),
+                                       **default_scale_bar_kwargs
                                        )
-
+            # add the scalebar
             ax.add_artist(scalebar)
+        # remove ticks and spines
         ax.set_axis_off()
-
+        # return fig and ax for further processing
         return fig, ax
 
 
@@ -1294,7 +1329,7 @@ def _gen_zplane(yx_shape, df, zplane, mag=10):
     # find the fiducials worth rendering
     df_zplane = df[np.abs(df.z0 - zplane) < df.sigma_z * radius]
     # calculate the amplitude of the z gaussian.
-    amps = np.exp(-((df_zplane.z0 - zplane) / df_zplane.sigma_z) ** 2 / 2) /(np.sqrt(2 * np.pi) * df_zplane.sigma_z)
+    amps = np.exp(-((df_zplane.z0 - zplane) / df_zplane.sigma_z) ** 2 / 2) / (np.sqrt(2 * np.pi) * df_zplane.sigma_z)
     # generate a 2D image weighted by the z gaussian.
     return _jit_gen_img_sub(yx_shape, df_zplane[["y0", "x0", "sigma_y", "sigma_x"]].values, mag, amps.values)
 
@@ -1416,7 +1451,12 @@ def measure_peak_widths(y):
 
 
 def count_blinks(offtimes, gap):
-    """"""
+    """Count the number of blinkers based on offtimes and a fixed gap
+
+    ontimes = measure_peak_widths((y > 0) * 1
+    offtimes = measure_peak_widths((y == 0) * 1
+
+    """
     breaks = np.nonzero(offtimes > gap)[0]
     if breaks.size:
         blinks = [offtimes[breaks[i] + 1:breaks[i+1]] for i in range(breaks.size - 1)]
