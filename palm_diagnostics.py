@@ -1322,7 +1322,7 @@ class DepthCodedImage(np.ndarray):
 
 
 @dask.delayed
-def _gen_zplane(yx_shape, df, zplane, mag=10):
+def _gen_zplane(yx_shape, df, zplane, mag, diffraction_limit):
     """A subfunction to generate a single z plane"""
     # again a hard coded radius
     radius = 5
@@ -1331,10 +1331,10 @@ def _gen_zplane(yx_shape, df, zplane, mag=10):
     # calculate the amplitude of the z gaussian.
     amps = np.exp(-((df_zplane.z0 - zplane) / df_zplane.sigma_z) ** 2 / 2) / (np.sqrt(2 * np.pi) * df_zplane.sigma_z)
     # generate a 2D image weighted by the z gaussian.
-    return _jit_gen_img_sub(yx_shape, df_zplane[["y0", "x0", "sigma_y", "sigma_x"]].values, mag, amps.values)
+    return _jit_gen_img_sub(yx_shape, df_zplane[["y0", "x0", "sigma_y", "sigma_x"]].values, mag, amps.values, diffraction_limit)
 
 
-def gen_img_3d(yx_shape, df, zplanes, mag=10):
+def gen_img_3d(yx_shape, df, zplanes, mag, diffraction_limit):
     """Generate a 3D image with gaussian point clouds
 
     Parameters
@@ -1349,13 +1349,13 @@ def gen_img_3d(yx_shape, df, zplanes, mag=10):
         The magnification factor to render the scene"""
     new_shape = tuple(np.array(yx_shape) * mag)
     # print(dask.array.from_delayed(_gen_zplane(df, yx_shape, zplanes[0], mag), new_shape, np.float))
-    rendered_planes = [dask.array.from_delayed(_gen_zplane(yx_shape, df, zplane, mag), new_shape, np.float)
+    rendered_planes = [dask.array.from_delayed(_gen_zplane(yx_shape, df, zplane, mag, diffraction_limit), new_shape, np.float)
                                    for zplane in zplanes]
     to_compute = dask.array.stack(rendered_planes)
     return to_compute.compute()
 
 
-def save_img_3d(yx_shape, df, savepath, zspacing=None, zplanes=None, mag=10, **kwargs):
+def save_img_3d(yx_shape, df, savepath, zspacing=None, zplanes=None, mag=10, diffraction_limit=False, **kwargs):
     """Generates and saves a gaussian rendered 3D image along with the relevant metadata in a tif stack
 
     Parameters
@@ -1375,8 +1375,9 @@ def save_img_3d(yx_shape, df, savepath, zspacing=None, zplanes=None, mag=10, **k
             raise ValueError("zspacing or zplanes must be specified")
         zplanes = np.arange(df.z0.min() - zspacing / 2, df.z0.max() + zspacing / 2, zspacing)
 
+
     # generate the actual image
-    img3d = gen_img_3d(yx_shape, df, zplanes, mag)
+    img3d = gen_img_3d(yx_shape, df, zplanes, mag, diffraction_limit)
 
     # save kwargs
     tif_kwargs = dict(compress=6, imagej=True, resolution=(mag, mag),
@@ -1390,7 +1391,7 @@ def save_img_3d(yx_shape, df, savepath, zspacing=None, zplanes=None, mag=10, **k
             slices=len(img3d),
             # This information is mostly redundant with "spacing" but is included
             # incase one wanted to render arbitrarily spaced planes.
-            labels=["z = {}".format(zplane) for zplane in zplane],
+            labels=["z = {}".format(zplane) for zplane in zplanes],
             )
         )
 
