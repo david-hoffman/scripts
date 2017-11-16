@@ -1373,14 +1373,12 @@ def save_img_3d(yx_shape, df, savepath, zspacing=None, zplanes=None, mag=10, dif
     if zplanes is None:
         if zspacing is None:
             raise ValueError("zspacing or zplanes must be specified")
-        zplanes = np.arange(df.z0.min() - zspacing / 2, df.z0.max() + zspacing / 2, zspacing)
-
+        zplanes = np.arange(df.z0.min(), df.z0.max() + zspacing, zspacing)
 
     # generate the actual image
     img3d = gen_img_3d(yx_shape, df, zplanes, mag, diffraction_limit)
-
     # save kwargs
-    tif_kwargs = dict(compress=6, imagej=True, resolution=(mag, mag),
+    tif_kwargs = dict(resolution=(mag, mag),
         metadata=dict(
             # spacing is the depth spacing for imagej
             spacing=zspacing,
@@ -1392,14 +1390,21 @@ def save_img_3d(yx_shape, df, savepath, zspacing=None, zplanes=None, mag=10, dif
             # This information is mostly redundant with "spacing" but is included
             # incase one wanted to render arbitrarily spaced planes.
             labels=["z = {}".format(zplane) for zplane in zplanes],
+            axes="ZYX"
             )
         )
 
+    tif_ready = tif_convert(img3d)
+    # check if bigtiff is necessary.
+    if tif_ready.nbytes / (4 * 1024**3) < 0.95:
+        tif_kwargs.update(dict(imagej=True))
+    else:
+        tif_kwargs.update(dict(imagej=False, compress=6))
+
     # incase user wants to change anything
     tif_kwargs.update(kwargs)
-
     # save the tif
-    tif.imsave(fix_ext(savepath, ".tif"), tif_convert(img3d), **tif_kwargs)
+    tif.imsave(fix_ext(savepath, ".tif"), tif_ready, **tif_kwargs)
 
     # return data to user for further processing.
     return img3d
