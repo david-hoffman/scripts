@@ -10,7 +10,7 @@ import pandas as pd
 # regular plotting
 import matplotlib.pyplot as plt
 import matplotlib.cm
-from matplotlib.colors import LogNorm, PowerNorm, ListedColormap
+from matplotlib.colors import Normalize, LogNorm, PowerNorm, ListedColormap
 import matplotlib.font_manager as fm
 from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
 
@@ -1220,7 +1220,7 @@ class DepthCodedImage(np.ndarray):
                 zrange=self.zrange
             )
 
-        tif_kwargs = dict(compress=6, imagej=True, resolution=(self.mag, self.mag),
+        tif_kwargs = dict(imagej=True, resolution=(self.mag, self.mag),
             metadata=dict(
                 # let's stay agnostic to units for now
                 unit="pixel",
@@ -1250,13 +1250,24 @@ class DepthCodedImage(np.ndarray):
         """Return the alpha channel of the image"""
         return np.asarray(self)[..., 3]
 
-    def _norm_data(self, alpha=False, **kwargs):
+    def _norm_alpha(self, auto=False, **kwargs):
         """"""
         # power norm will normalize alpha to 0 to 1 after applying
         # a gamma correction and limiting data to vmin and vmax
         pkwargs = dict(gamma=1, clip=True)
         pkwargs.update(kwargs)
         new_alpha = PowerNorm(**pkwargs)(self.alpha)
+        # if auto is requested perform it
+        if auto:
+            vdict = auto_adjust(new_alpha)
+        else:
+            vdict = dict()
+        
+        new_alpha = Normalize(clip=True, **vdict)(new_alpha)
+        return new_alpha
+
+    def _norm_data(self, alpha, **kwargs):
+        new_alpha = self._norm_alpha(**kwargs)
         if alpha:
             new_data = np.dstack((self.RGB, new_alpha))
         else:
@@ -1275,7 +1286,7 @@ class DepthCodedImage(np.ndarray):
         else:
             imsave(savepath, img8bit)
         
-    def plot(self, pixel_size=0.13, unit="μm", scalebar_size=None, auto=False, subplots_kwargs=dict(), norm_kwargs=dict()):
+    def plot(self, pixel_size=0.13, unit="μm", scalebar_size=None, subplots_kwargs=dict(), norm_kwargs=dict()):
         """Make a nice plot of the data, with a scalebar"""
         # make the figure and axes
         fig, ax = plt.subplots(**subplots_kwargs)
@@ -1284,16 +1295,9 @@ class DepthCodedImage(np.ndarray):
         # show the color data
         ax.imshow(self.RGB, interpolation=None)
         # normalize the alpha channel
-        nkwargs = dict(gamma=1, clip=True)
-        nkwargs.update(norm_kwargs)
-        new_alpha = PowerNorm(**nkwargs)(self.alpha)
-        # if auto is requested perform it
-        if auto:
-            vdict = auto_adjust(new_alpha)
-        else:
-            vdict = dict()
+        new_alpha = self._norm_alpha(**norm_kwargs)
         # overlay the alpha channel over the color image
-        ax.matshow(new_alpha, cmap=greys_alpha_cm, **vdict)
+        ax.matshow(new_alpha, cmap=greys_alpha_cm)
         # add the colorbar
         fig.colorbar(cbar, label="z ({})".format(unit))
         # add scalebar if requested
