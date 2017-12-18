@@ -5,6 +5,7 @@
 import gc
 import json
 import os
+import warnings
 import numpy as np
 import pandas as pd
 # regular plotting
@@ -196,14 +197,14 @@ def find_fiducials(df, yx_shape, subsampling=1, diagnostics=False, **kwargs):
     pf.thresh = 0
     pf.find_blobs()
     blob_thresh = max(threshold_otsu(pf.blobs[:, 3]), num_frames / 10)
+    pf.blobs = pf.blobs[pf.blobs[:,3] > blob_thresh]
+    if diagnostics:
+        pf.plot_blobs(**kwargs)
     if not pf.blobs.size:
         # still no blobs then raise error
         raise RuntimeError("No blobs found!")
-    pf.blobs = pf.blobs[pf.blobs[:,3] > blob_thresh]
     if pf.blobs[:, 3].max() < num_frames * subsampling / 2:
         print("Warning, drift maybe too high to find fiducials")
-    if diagnostics:
-        pf.plot_blobs(**kwargs)
     # correct positions for subsampling
     return pf.blobs[:, :2] * subsampling
 
