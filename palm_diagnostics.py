@@ -1369,7 +1369,7 @@ def gen_img_3d(yx_shape, df, zplanes, mag, diffraction_limit):
     return to_compute.compute()
 
 
-def save_img_3d(yx_shape, df, savepath, zspacing=None, zplanes=None, mag=10, diffraction_limit=False, **kwargs):
+def save_img_3d(yx_shape, df, savepath, zspacing=None, zplanes=None, mag=10, diffraction_limit=False, hist=False, **kwargs):
     """Generates and saves a gaussian rendered 3D image along with the relevant metadata in a tif stack
 
     Parameters
@@ -1382,6 +1382,9 @@ def save_img_3d(yx_shape, df, savepath, zspacing=None, zplanes=None, mag=10, dif
         the path to save the file in.
     mag : int
         The magnification factor to render the scene
+
+
+    https://stackoverflow.com/questions/10724495/getting-all-arguments-and-values-passed-to-a-python-function
     """
     # figure out the zplanes to calculate
     if zplanes is None:
@@ -1390,7 +1393,11 @@ def save_img_3d(yx_shape, df, savepath, zspacing=None, zplanes=None, mag=10, dif
         zplanes = np.arange(df.z0.min(), df.z0.max() + zspacing, zspacing)
 
     # generate the actual image
-    img3d = gen_img_3d(yx_shape, df, zplanes, mag, diffraction_limit)
+    if not hist:
+        img3d = gen_img_3d(yx_shape, df, zplanes, mag, diffraction_limit)
+    else:
+        bins = [zplanes] + [np.arange(0, dim + 1.5/mag, 1/mag) for dim in yx_shape]
+        img3d = fast_hist3d(df[["z0", "y0", "x0"]].values, bins)
     # save kwargs
     tif_kwargs = dict(resolution=(mag, mag),
         metadata=dict(
@@ -1413,7 +1420,7 @@ def save_img_3d(yx_shape, df, savepath, zspacing=None, zplanes=None, mag=10, dif
     if tif_ready.nbytes / (4 * 1024**3) < 0.95:
         tif_kwargs.update(dict(imagej=True))
     else:
-        tif_kwargs.update(dict(imagej=False, compress=6))
+        tif_kwargs.update(dict(imagej=False, compress=6, bigtiff=True))
 
     # incase user wants to change anything
     tif_kwargs.update(kwargs)
