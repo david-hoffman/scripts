@@ -616,15 +616,20 @@ class Data405(object):
         self.fit_win = data_df_crop.index.min(), data_df_crop.index.max()
         
     def plot(self, ax=None, limits=True, lower_limit=0.45):
-        # this is fast so no cost
-        self.fit(lower_limit)
         if ax is None:
             fig, ax = plt.subplots()
-        self.data[["reactivation", "fit"]].plot(ax=ax)
-        ax.text(0.1, 0.5, "$y(t) = {:.3f} e^{{{:.3f}t}} + {:.3f}$".format(*self.popt), transform=ax.transAxes)
-        if limits:
-            for edge in self.fit_win:
-                ax.axvline(edge, color="r")
+        # check if enough data exists to fit
+        if (self.data["reactivation"] > lower_limit).sum() > 100:
+            # this is fast so no cost
+            self.fit(lower_limit)
+            self.data[["reactivation", "fit"]].plot(ax=ax)
+            ax.text(0.1, 0.5, "$y(t) = {:.3f} e^{{{:.3f}t}} + {:.3f}$".format(*self.popt), transform=ax.transAxes)
+            if limits:
+                for edge in self.fit_win:
+                    ax.axvline(edge, color="r")
+        else:
+            warnings.warn("Not enough data to fit")
+            self.data["reactivation"].plot(ax=ax)
 
 
 ### Fit Functions
