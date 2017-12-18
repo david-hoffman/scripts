@@ -400,7 +400,7 @@ class RawImages(object):
         return self.median_frames[s].mean()
 
 
-def auto_z(palm_df, min_dist=0, max_dist=np.inf, nbins=256, diagnostics=False):
+def auto_z(palm_df, min_dist=0, max_dist=np.inf, nbins=64, diagnostics=False):
     """Automatically find good limits for z"""
     # make histogram
     hist, bins = np.histogram(palm_df.z0, bins=nbins)
@@ -548,10 +548,19 @@ class PALMData(object):
         return self.processed.groupby("frame")
 
     @cached_property
+    def filtered_frame(self):
+        """Make a groupby object that is by frame"""
+        return self.processed_filtered.groupby("frame")
+
+    @cached_property
     def raw_counts(self):
         """Number of localizations per frame, not filtering"""
         return self.raw_frame.x0.count()
 
+    @cached_property
+    def filtered_counts(self):
+        """Number of localizations per frame, not filtering"""
+        return self.filtered_frame.x0.count()
 
     def sigmas(self, filt="_filtered", frame=0):
         """Plot sigmas"""
@@ -711,6 +720,11 @@ class PALMExperiment(object):
         return pd.Series(self.raw.masked_mean - self.raw.raw_bg(masked=True),
                          np.arange(len(self.raw.masked_mean))*self.timestep, name="Raw Intensity")
 
+    @property
+    def nphotons(self):
+        """number of photons per frame calculated from integrated intensity"""
+        return self.masked_mean * (self.raw.shape[-1] * self.raw.shape[-2])
+
     def plot_drift(self, max_s=0.15, max_fid=10):
         fid_dfs = extract_fiducials(self.palm.processed, find_fiducials(self.palm.processed, self.raw.shape[1:]), 1)
         fid_stats, all_drift = calc_fiducial_stats(fid_dfs)
@@ -742,7 +756,8 @@ class PALMExperiment(object):
             if func is weird:
                 m = self.nofeedback.max()
                 p0 = (m, 1, -1, m / 10, 0.5, -0.5)
-                func_label = ("$y(t) = " + "+".join(["{:.3f} (1 + {:.3f} t)^{{{:.3f}}}"] * 2) + "$")
+        func_label_dict = {weird : ("$y(t) = " + "+".join(["{:.3f} (1 + {:.3f} t)^{{{:.3f}}}"] * 2) + "$")}
+        func_label = func_label_dict[weird]
 
         # do the fit
         popt, pcov = curve_fit(func, self.nofeedback.index, self.nofeedback, p0=p0)
@@ -761,32 +776,39 @@ class PALMExperiment(object):
         ax.set_title(title)
         return fig, ax
 
-    def plot_all(self):
-        fig, axs = plt.subplots(3, figsize=(6, 10))
-        (ax0, ax1, ax2) = axs
-        ax0.get_shared_x_axes().join(ax0, ax1)
-        self.feedback.plot(ax=ax0)
-        self.feedback.rolling(1000, 0, center=True).mean().plot(ax=ax0)
+    def plot_all(self, **kwargs):
+        """Plot many statistics for a PALM photophysics expt"""
         # normalize index
         raw_counts = self.palm.raw_counts.loc[self.nofeedbackframes:]
-        raw_counts.index = raw_counts.index * self.timestep
-        # plot data and rolling average
-        raw_counts.plot(ax=ax1)
-        raw_counts.rolling(1000, 0, center=True).mean().plot(ax=ax1)
-        self.activation.plot(ax=ax2, limits=False)
+        # number of photons per frame
+        nphotons = self.palm.filtered_frame.nphotons.mean()
+        # contrast after feedback is enabeled
+        contrast = (nphotons.loc[self.nofeedbackframes:] / self.nphotons.max())
+        raw_counts.index = contrast.index = raw_counts.index * self.timestep
+        # make the figure
+        fig, axs = plt.subplots(4, figsize=(6, 12))
+        (ax0, ax1, ax2, ax3) = axs
+        # join the axes together
+        ax0.get_shared_x_axes().join(*axs[:3])
+        for ax, df in zip(axs[:3], (self.feedback, raw_counts, contrast)):
+            df.plot(ax=ax)
+            df.rolling(1000, 0, center=True).mean().plot(ax=ax)
 
-        for ax in (ax0, ax1):
+        self.activation.plot(ax=ax3, limits=False, **kwargs)
+
+        for ax in axs[:3]:
             ax.set_xticklabels([])
             ax.set_xlabel("")
 
         ax0.set_ylabel("Average Frame Intensity\n(Background Subtracted)")
         ax1.set_ylabel("Raw Localizations\nPer Frame (with Fiducials)")
-        ax2.set_ylabel("405 Voltage (V)")
+        ax2.set_ylabel("Contrast Ratio")
+        ax3.set_ylabel("405 Voltage (V)")
 
         ax0.set_title("Feedback Only")
 
         fig.tight_layout()
-        return fig, (ax0, ax1, ax2)
+        return fig, axs
 
 
 def add_line(ax, data, func=np.mean, fmt_str=":.0f", **kwargs):
