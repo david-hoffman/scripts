@@ -1291,6 +1291,10 @@ class DepthCodedImage(np.ndarray):
             DepthCodedImage(img8bit, self.cmap, self.mag, self.zrange).save(savepath)
         else:
             imsave(savepath, img8bit)
+
+    def save_alpha(self, savepath, **kwargs):
+        # normalize path name to make sure that it end's in .tif
+        DepthCodedImage(self.alpha, self.cmap, self.mag, self.zrange).save(savepath)
         
     def plot(self, pixel_size=0.13, unit="μm", scalebar_size=None, subplots_kwargs=dict(), norm_kwargs=dict()):
         """Make a nice plot of the data, with a scalebar"""
