@@ -378,7 +378,7 @@ class RawImages(object):
         """return the masked mean"""
         raw_reshape = self.raw.reshape(self.raw.shape[0], -1)
         raw_masked = raw_reshape[:, self.mask.ravel()]
-        return raw_masked.mean(1).compute(get=dask.multiprocessing.get)
+        return raw_masked.astype(float).mean(1).compute(get=dask.multiprocessing.get)
 
     @property
     def raw_sum(self):
