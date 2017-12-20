@@ -408,8 +408,16 @@ class RawImages(object):
         self.median_frames = np.median(self.raw[-num_frames:], 0)
         return self.median_frames[s].mean()
 
+def max_z(palm_df, nbins=128):
+    """Get the most likely z"""
+    hist, bins = np.histogram(palm_df.z0, bins=nbins)
+    # calculate center of bins
+    z = np.diff(bins)/2 + bins[:-1]
+    # find the max z
+    max_z = z[hist.argmax()]
+    return max_z
 
-def auto_z(palm_df, min_dist=0, max_dist=np.inf, nbins=64, diagnostics=False):
+def auto_z(palm_df, min_dist=0, max_dist=np.inf, nbins=128, diagnostics=False):
     """Automatically find good limits for z"""
     # make histogram
     hist, bins = np.histogram(palm_df.z0, bins=nbins)
@@ -528,7 +536,11 @@ class PALMData(object):
             df = self.grouped
         else:
             df = self.processed
-        auto_min_z, auto_max_z = auto_z(df, **kwargs)
+        try:
+            auto_min_z, auto_max_z = auto_z(df, **kwargs)
+        except ValueError:
+            warnings.warn("`auto_z` has failed, no clipping of z will be done.")
+            auto_min_z, auto_max_z = -np.inf, np.inf
         if min_z is None:
             min_z = auto_min_z
         if max_z is None:
