@@ -1434,6 +1434,8 @@ def save_img_3d(yx_shape, df, savepath, zspacing=None, zplanes=None, mag=10, dif
     if zplanes is None:
         if zspacing is None:
             raise ValueError("zspacing or zplanes must be specified")
+        # this is better I think.
+        # zplanes = np.arange(df.z0.min() + zspacing, df.z0.max() + zspacing, zspacing) - zspacing / 2
         zplanes = np.arange(df.z0.min(), df.z0.max() + zspacing, zspacing)
 
     # generate the actual image
@@ -1441,7 +1443,7 @@ def save_img_3d(yx_shape, df, savepath, zspacing=None, zplanes=None, mag=10, dif
         img3d = gen_img_3d(yx_shape, df, zplanes, mag, diffraction_limit)
     else:
         bins = [zplanes] + [np.arange(0, dim + 1.5/mag, 1/mag) for dim in yx_shape]
-        img3d = fast_hist3d(df[["z0", "y0", "x0"]].values, bins)
+        img3d = fast_hist3d(df[["z0", "y0", "x0"]].values, bins)[0]
     # save kwargs
     tif_kwargs = dict(resolution=(mag, mag),
         metadata=dict(
