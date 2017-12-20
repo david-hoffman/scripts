@@ -805,7 +805,8 @@ class PALMExperiment(object):
         nphotons = self.palm.filtered_frame.nphotons.mean()
         # contrast after feedback is enabeled
         contrast = (nphotons.loc[self.nofeedbackframes:] / self.nphotons.max())
-        raw_counts.index = contrast.index = raw_counts.index * self.timestep
+        raw_counts.index = raw_counts.index * self.timestep
+        contrast.index = contrast.index * self.timestep
         # make the figure
         fig, axs = plt.subplots(4, figsize=(6, 12))
         (ax0, ax1, ax2, ax3) = axs
