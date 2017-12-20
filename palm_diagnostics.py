@@ -300,22 +300,31 @@ class memoize(object):
 # Lazy functions for raw data handling
 lazy_imread = dask.delayed(tif.imread, pure=True)
 
-def make_lazy_data(paths):
+def _get_tif_info(path):
+    """Get the tifffile shape with the least amount of work"""
+    with tif.TiffFile(path) as mytif:
+        s = mytif.series[0]
+    return dict(shape=s.shape, dtype=s.dtype)
+
+def make_lazy_data(paths, read_all_shapes=False):
     """Make a lazy data array from a set of paths to data
 
     Assumes all data is of same shape and type."""
-    lazy_data = [lazy_imread(path) for path in paths]
-    # read first image for shape
-    sample = tif.imread(paths[0])
-    data = [dask.array.from_delayed(ld, shape=sample.shape, dtype=sample.dtype) for ld in lazy_data]
-    data_array = dask.array.concatenate(data)
+    if read_all_shapes:
+        data = [dask.array.from_delayed(lazy_imread(path), **_get_tif_info(path)) for path in tqdm.tqdm_notebook(paths)]
+        data_array = dask.array.concatenate(data)
+    else:
+        # read first image for shape
+        sample = _get_tif_info(paths[0])
+        data = [dask.array.from_delayed(lazy_imread(path), **sample) for path in paths]
+        data_array = dask.array.concatenate(data)
     return data_array
 
 class RawImages(object):
     """A container for lazy raw images"""
     
-    def __init__(self, paths_to_raw):
-        self.raw = make_lazy_data(paths_to_raw)
+    def __init__(self, paths_to_raw, read_all_shapes=False):
+        self.raw = make_lazy_data(paths_to_raw, read_all_shapes=read_all_shapes)
 
     def __len__(self):
         return len(self.raw)
