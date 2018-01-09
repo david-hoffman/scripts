@@ -59,7 +59,9 @@ def peakselector_df(path, verbose=False):
         print("Reading {} into memory ... ".format(path))
     sav = readsav(path, verbose=verbose)
     # pull out cgroupparams, set the byteorder to native and set the rownames
+    # sav["totalrawdata"] has the raw data, we can use this to get dimensions.
     df = pd.DataFrame(sav["cgroupparams"].byteswap().newbyteorder(), columns=sav["rownames"].astype(str))
+    df.totalrawdata = sav["totalrawdata"]
     return df
 
 pb = ProgressBar()
@@ -455,44 +457,53 @@ class PALMData(object):
     """A simple class to manipulate peakselector data"""
     # columns we want to keep
 
-
-    peak_col = {
-        'X Position': "x0",
-        'Y Position': "y0",
-        '6 N Photons': "nphotons",
-        'Frame Number': "frame",
-        'Sigma X Pos Full': "sigma_x",
-        'Sigma Y Pos Full': "sigma_y",
-        'Sigma Z': "sigma_z",
-        'Z Position': 'z0',
-        'Offset': 'offset',
-        'Amplitude': 'amp'
-    }
-
-    group_col = {
-        'Frame Number': 'frame',
-        'Group X Position': 'x0',
-        'Group Y Position': 'y0',
-        'Group Sigma X Pos': 'sigma_x',
-        'Group Sigma Y Pos': 'sigma_y',
-        'Sigma Z': "sigma_z",
-        'Group N Photons': 'nphotons',
-        '24 Group Size': 'groupsize',
-        'Group Z Position': 'z0',
-        'Offset': 'offset',
-        'Amplitude': 'amp'
-    }
-
     def __init__(self, path_to_sav, verbose=False):
         """To initialize the experiment we need to know where the raw data is
         and where the peakselector processed data is
         
         Assumes paths_to_raw are properly sorted"""
         
+        self.peak_col = {
+            'X Position': "x0",
+            'Y Position': "y0",
+            '6 N Photons': "nphotons",
+            'Frame Number': "frame",
+            'Sigma X Pos Full': "sigma_x",
+            'Sigma Y Pos Full': "sigma_y",
+            'Sigma Z': "sigma_z",
+            'Z Position': 'z0',
+            'Offset': 'offset',
+            'Amplitude': 'amp'
+        }
+
+        self.group_col = {
+            'Frame Number': 'frame',
+            'Group X Position': 'x0',
+            'Group Y Position': 'y0',
+            'Group Sigma X Pos': 'sigma_x',
+            'Group Sigma Y Pos': 'sigma_y',
+            'Sigma Z': "sigma_z",
+            'Group N Photons': 'nphotons',
+            '24 Group Size': 'groupsize',
+            'Group Z Position': 'z0',
+            'Offset': 'offset',
+            'Amplitude': 'amp'
+        }
+
         # load peakselector data
-        raw_df = peakselector_df(path_to_sav, verbose=verbose).astype(float)
+        raw_df = peakselector_df(path_to_sav, verbose=verbose)
+        # the dummy attribute won't stick around after casting, so pull it now.
+        self.totalrawdata = raw_df.totalrawdata
+        raw_df = raw_df.astype(float)
         # convert Frame number to int
-        raw_df[['Frame Number', '24 Group Size']] = raw_df[['Frame Number', '24 Group Size']].astype(int)
+        int_cols = ['Frame Number', '24 Group Size', 'Label Set']
+        raw_df[int_cols] = raw_df[int_cols].astype(int)
+        # don't discard label column if it's being used
+        if raw_df["Label Set"].unique().size > 1:
+            d = {"Label Set": "label"}
+            self.peak_col.update(d)
+            self.group_col.update(d)
+        # 
         self.processed = raw_df[list(self.peak_col.keys())]
         self.grouped = grouped_peaks(raw_df)[list(self.group_col.keys())]
         # normalize column names
@@ -693,7 +704,7 @@ class PALMExperiment(object):
     """A simple class to organize our experimental data"""
 
     def __init__(self, raw_or_paths_to_raw, path_to_sav, path_to_405, verbose=False, init=False,
-                 timestep=0.0525, nofeedbackframes=250*1000,**kwargs):
+                 timestep=0.0525, chunksize=250, **kwargs):
         """To initialize the experiment we need to know where the raw data is
         and where the peakselector processed data is
         
@@ -713,12 +724,14 @@ class PALMExperiment(object):
             self.palm = path_to_sav
 
         self.timestep = timestep
-        self.nofeedbackframes = nofeedbackframes
 
         try:
             self.activation = Data405(path_to_405)
         except ValueError:
             self.activation = path_to_405
+
+        self.feedbackframes = chunksize * len(self.activation.data)
+        self.nofeedbackframes = self.palm.processed.frame.max() - self.feedbackframes + 1
 
         if init:
             self.palm.filter_peaks_and_beads(yx_shape=self.raw.shape[-2:])
@@ -734,12 +747,11 @@ class PALMExperiment(object):
         ))
         self.palm.filter_peaks_and_beads(peak_kwargs, fiducial_kwargs, filter_z_kwargs)
 
-
     @cached_property
     def masked_mean(self):
         """The masked mean minus the masked background"""
         return pd.Series(self.raw.masked_mean - self.raw.raw_bg(masked=True),
-                         np.arange(len(self.raw.masked_mean))*self.timestep, name="Raw Intensity")
+                         np.arange(len(self.raw.masked_mean)) * self.timestep, name="Raw Intensity")
 
     @property
     def nphotons(self):
@@ -757,16 +769,15 @@ class PALMExperiment(object):
 
         return plot_stats([fid_dfs[g] for g in good_fid.index], z_pix_size=1)
 
-
     @property
     def nofeedback(self):
         """The portion of the intensity decay that doesn't have feedback"""
-        return self.masked_mean.iloc[:self.nofeedbackframes]
+        return self.masked_mean.iloc[:-self.feedbackframes]
 
     @property
     def feedback(self):
         """the portion of the intensity decay that does have feedback"""
-        return self.masked_mean.iloc[self.nofeedbackframes:]
+        return self.masked_mean.iloc[-self.feedbackframes:]
 
     def plot_w_fit(self, title, ax=None, func=weird, p0=None):
         if ax is None:
@@ -777,7 +788,7 @@ class PALMExperiment(object):
             if func is weird:
                 m = self.nofeedback.max()
                 p0 = (m, 1, -1, m / 10, 0.5, -0.5)
-        func_label_dict = {weird : ("$y(t) = " + "+".join(["{:.3f} (1 + {:.3f} t)^{{{:.3f}}}"] * 2) + "$")}
+        func_label_dict = {weird: ("$y(t) = " + "+".join(["{:.3f} (1 + {:.3f} t)^{{{:.3f}}}"] * 2) + "$")}
         func_label = func_label_dict[weird]
 
         # do the fit
@@ -800,11 +811,11 @@ class PALMExperiment(object):
     def plot_all(self, **kwargs):
         """Plot many statistics for a PALM photophysics expt"""
         # normalize index
-        raw_counts = self.palm.raw_counts.loc[self.nofeedbackframes:]
+        raw_counts = self.palm.raw_counts.loc[-self.feedbackframes:]
         # number of photons per frame
         nphotons = self.palm.filtered_frame.nphotons.mean()
         # contrast after feedback is enabeled
-        contrast = (nphotons.loc[self.nofeedbackframes:] / self.nphotons.max())
+        contrast = (nphotons.loc[-self.feedbackframes:] / self.nphotons.max())
         raw_counts.index = raw_counts.index * self.timestep
         contrast.index = contrast.index * self.timestep
         # make the figure
@@ -1162,26 +1173,50 @@ def _gen_img_sub(yx_shape, params, mag, multipliers, diffraction_limit):
             g *= multipliers[i]
         # update image
         img[ystart:yend, xstart:xend] += g
-        
+
     return img
 
 _jit_gen_img_sub = njit(_gen_img_sub, nogil=True)
 
 
+# @pdiag.dask.delayed
+# def _gen_img_sub_thread(chunklen, chunk, yx_shape, df, mag, multipliers, diffraction_limit):
+#     """"""
+#     s = slice(chunk * chunklen, (chunk + 1) * chunklen)
+#     df_chunk = df[["y0", "x0", "sigma_y", "sigma_x"]].values[s]
+#     # calculate the amplitude of the z gaussian.
+#     amps = multipliers[s]
+#     # generate a 2D image weighted by the z gaussian.
+#     return pdiag._jit_gen_img_sub(yx_shape, df_chunk, mag, amps, diffraction_limit)
+
+
+# def _gen_img_sub_threaded(yx_shape, df, mag, multipliers, diffraction_limit, numthreads=1):
+#     """"""
+#     length = len(df)
+#     chunklen = (length + numthreads - 1) // numthreads
+#     new_shape = tuple(np.array(yx_shape) * mag)
+#     # print(dask.array.from_delayed(_gen_zplane(df, yx_shape, zplanes[0], mag), new_shape, np.float))
+#     rendered_threads = [pdiag.dask.array.from_delayed(
+#         _gen_img_sub_thread(chunklen, chunk, yx_shape, df, mag, multipliers, diffraction_limit), new_shape, np.float)
+#                         for chunk in range(numthreads)]
+#     lazy_result = pdiag.dask.array.stack(rendered_threads)
+#     return lazy_result.sum(0)
+
 def _gen_img_sub_threaded(yx_shape, df, mag, multipliers, diffraction_limit, numthreads=1):
     keys_for_render = ["y0", "x0", "sigma_y", "sigma_x"]
-    df = df[keys_for_render]
+    df = df[keys_for_render].values
     length = len(df)
     chunklen = (length + numthreads - 1) // numthreads
     # Create argument tuples for each input chunk
-    df_chunks = [df.iloc[i * chunklen:(i + 1) * chunklen] for i in range(numthreads)]
+    df_chunks = [df[i * chunklen:(i + 1) * chunklen] for i in range(numthreads)]
     mult_chunks = [multipliers[i * chunklen:(i + 1) * chunklen] for i in range(numthreads)]
-    lazy_result = [dask.delayed(_jit_gen_img_sub)(yx_shape, df_chunk.values, mag, mult, diffraction_limit)
-                               for df_chunk, mult in zip(df_chunks, mult_chunks)]
-    lazy_result = dask.array.stack([dask.array.from_delayed(l, np.array(yx_shape) * mag, np.float)
-        for l in lazy_result])
+    delayed_jit_gen_img_sub = dask.delayed(_jit_gen_img_sub)
+    lazy_result = [delayed_jit_gen_img_sub(yx_shape, df_chunk, mag, mult, diffraction_limit)
+                   for df_chunk, mult in zip(df_chunks, mult_chunks)]
+    lazy_result = dask.array.stack(
+        [dask.array.from_delayed(l, np.array(yx_shape) * mag, np.float) for l in lazy_result])
     return lazy_result.sum(0)
-    
+
 
 def gen_img(yx_shape, df, mag=10, cmap="gist_rainbow", weight="amp", diffraction_limit=False, numthreads=1):
     """Generate a 2D image, optionally with z color coding
@@ -1325,6 +1360,9 @@ class DepthCodedImage(np.ndarray):
         return new_data
 
     def save_color(self, savepath, alpha=False, **kwargs):
+        """Save a color image of the depth coded data
+
+        Note: to save RGB only use "gamma=0"""
         # normalize path name to make sure that it end's in .tif
         ext = os.path.splitext(savepath)[1]
         if ext.lower() == ".tif":
@@ -1442,7 +1480,11 @@ def save_img_3d(yx_shape, df, savepath, zspacing=None, zplanes=None, mag=10, dif
     if not hist:
         img3d = gen_img_3d(yx_shape, df, zplanes, mag, diffraction_limit)
     else:
-        bins = [zplanes] + [np.arange(0, dim + 1.5/mag, 1/mag) for dim in yx_shape]
+        dz = np.diff(zplanes)
+        bins = [np.concatenate((zplanes[:-1] - dz / 2, zplanes[-2:] + dz[-1] / 2))]
+        # we want the xy bins to be centered on each pixel, i.e. the first bin is centered
+        # on 0 so has edges of -0.5 and 0.5
+        bins = bins + [np.arange(0, dim + 1.0 / mag, 1 / mag) - 1 / mag / 2 for dim in yx_shape]
         img3d = fast_hist3d(df[["z0", "y0", "x0"]].values, bins)[0]
     # save kwargs
     tif_kwargs = dict(resolution=(mag, mag),
