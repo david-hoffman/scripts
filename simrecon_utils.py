@@ -1124,7 +1124,7 @@ def split_img(img, side):
     # reshape array so that it's a tiled image
     img_s0 = img.reshape(-1, divisor, side, divisor, side)
     # roll one axis so that the tile's y, x coordinates are next to each other
-    img_s1 = np.rollaxis(img_s0, 3, 1)
+    img_s1 = np.rollaxis(img_s0, -3, -1)
     # combine the tile's y, x coordinates into one axis.
     img_s2 = img_s1.reshape(-1, divisor**2, side, side)
     # roll axis so that we can easily iterate through tiles
@@ -1135,15 +1135,19 @@ def combine_img(img_stack):
     '''
     A utility to combine a processed stack.
     '''
-
-    num_sub_imgs, ylen, xlen = img_stack.shape
+    if img_stack.ndim < 4:
+        # extend array
+        img_stack = img_stack[:, None]
+    num_sub_imgs, zlen, ylen, xlen = img_stack.shape
     divisor = int(np.sqrt(num_sub_imgs))
     assert xlen == ylen, '{} != {}'.format(xlen, ylen)
     assert np.sqrt(num_sub_imgs) == divisor
 
-    return np.rollaxis(
-        img_stack.reshape(divisor, divisor, ylen, xlen), 0, 3
-    ).reshape(ylen * divisor, xlen * divisor)
+    # move z to front
+    img_stack = np.rollaxis(img_stack, 1)
+    return np.squeeze(np.rollaxis(
+        img_stack.reshape(zlen, divisor, divisor, ylen, xlen), 2, 4
+    ).reshape(zlen, ylen * divisor, xlen * divisor))
 
 
 def split_img_with_padding(img, side, pad_width, mode='reflect'):

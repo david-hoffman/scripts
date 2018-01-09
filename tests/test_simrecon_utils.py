@@ -22,13 +22,19 @@ def test_img_split_combine():
     """Testing that the split and combine functions are opposites of
     one another"""
 
-    fake_data = np.random.randn(1024, 1024)
+    fake_data = np.random.randn(10, 1024, 1024)
 
-    split_data = su.split_img(fake_data, 4)
+    split_data = su.split_img(fake_data, 256)
+    print(split_data.shape)
+    assert_array_equal(fake_data[:, :256, :256], split_data[0], "First tile not okay")
 
-    combine_data = su.combine_img(split_data[:, 0])
+    assert_array_equal(fake_data[:, :256, 256:512], split_data[1], "Second tile not okay")
 
-    assert_array_equal(fake_data, combine_data)
+    assert_array_equal(fake_data[:, 256:512, :256], split_data[4], "fifth tile not okay")
+
+    combine_data = su.combine_img(split_data)
+
+    assert_array_equal(fake_data, combine_data, "Test failed")
 
 
 def test_img_split_combine2():
@@ -40,7 +46,7 @@ def test_img_split_combine2():
 
     # split data 4 ways and then take mean along second dimension
     # (phase dimension)
-    split_data = su.split_img(data, 4).mean(1)
+    split_data = su.split_img(data, 256).mean(1)
     # combine data
     combine_data = su.combine_img(split_data)
     # compare to straight mean.
