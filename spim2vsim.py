@@ -134,7 +134,7 @@ def spim2vsim(path_or_basename):
         assert len(settings_files) == 1, "There were {} settings files, please check names".format(len(settings_files))
         settings = parse_settings(settings_files[0])
         # change base name to better suit naming
-        basename += os.path.dirname(basename)
+        basename += os.path.basename(os.path.dirname(basename))
     else:
         # case for basename
         basename = path_or_basename
@@ -158,7 +158,7 @@ def spim2vsim(path_or_basename):
         activation = data[1::2]
         data = data[::2]
         # save activation data
-        tif.imsave(basename + "activation.tif", rearrange_spim_data(activation, settings["dz"]))
+        tif.imsave(basename + "_activation.tif", rearrange_spim_data(activation, settings["dz"]))
     vsim_data = rearrange_spim_data(data, settings["dz"])
     # rearrange data
     # save activation data as tif if it exists
