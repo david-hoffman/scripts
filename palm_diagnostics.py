@@ -587,12 +587,12 @@ class PALMData(object):
     @cached_property
     def raw_counts(self):
         """Number of localizations per frame, not filtering"""
-        return self.raw_frame.x0.count()
+        return self.raw_frame[["x0"]].count()
 
     @cached_property
     def filtered_counts(self):
         """Number of localizations per frame, not filtering"""
-        return self.filtered_frame.x0.count()
+        return self.filtered_frame[["x0"]].count()
 
     def sigmas(self, filt="_filtered", frame=0):
         """Plot sigmas"""
@@ -731,7 +731,7 @@ class PALMExperiment(object):
             self.activation = path_to_405
 
         self.feedbackframes = chunksize * len(self.activation.data)
-        self.nofeedbackframes = self.palm.processed.frame.max() - self.feedbackframes + 1
+        self.nofeedbackframes = self.palm.processed.frame.max() - self.feedbackframes
 
         if init:
             self.palm.filter_peaks_and_beads(yx_shape=self.raw.shape[-2:])
@@ -772,12 +772,12 @@ class PALMExperiment(object):
     @property
     def nofeedback(self):
         """The portion of the intensity decay that doesn't have feedback"""
-        return self.masked_mean.iloc[:-self.feedbackframes]
+        return self.masked_mean.iloc[:self.nofeedbackframes]
 
     @property
     def feedback(self):
         """the portion of the intensity decay that does have feedback"""
-        return self.masked_mean.iloc[-self.feedbackframes:]
+        return self.masked_mean.iloc[self.nofeedbackframes:]
 
     def plot_w_fit(self, title, ax=None, func=weird, p0=None):
         if ax is None:
@@ -811,11 +811,11 @@ class PALMExperiment(object):
     def plot_all(self, **kwargs):
         """Plot many statistics for a PALM photophysics expt"""
         # normalize index
-        raw_counts = self.palm.raw_counts.loc[-self.feedbackframes:]
+        raw_counts = self.palm.raw_counts.loc[self.nofeedbackframes:]
         # number of photons per frame
         nphotons = self.palm.filtered_frame.nphotons.mean()
         # contrast after feedback is enabeled
-        contrast = (nphotons.loc[-self.feedbackframes:] / self.nphotons.max())
+        contrast = (nphotons.loc[self.nofeedbackframes:] / self.nphotons.max())
         raw_counts.index = raw_counts.index * self.timestep
         contrast.index = contrast.index * self.timestep
         # make the figure

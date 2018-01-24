@@ -84,7 +84,7 @@ def get_center_wavlength(emission_filter):
 
 
 def parse_settings(path):
-    re_dz = re.compile(r"(?:Z Obj Offset\D*\d[^-\d]*)((?:\s*-?\d+(?:\.\d+)?)+)")
+    # re_dz = re.compile(r"(?:Z Obj Offset\D*\d[^-\d]*)((?:\s*-?\d+(?:\.\d+)?)+)")
     re_dz = re.compile(r"Z Obj Offset.*")
     re_wl = re.compile(r"Excitation Filter.*")
 
