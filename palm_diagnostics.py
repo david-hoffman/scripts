@@ -194,12 +194,12 @@ def find_fiducials(df, yx_shape, subsampling=1, diagnostics=False, **kwargs):
     num_frames = df.frame.max() - df.frame.min()
     hist_2d = palm_hist(df, yx_shape, subsampling)
     pf = PeakFinder(hist_2d.astype(int), 1)
-    pf.blob_sigma = 1/subsampling
+    pf.blob_sigma = 1 / subsampling
     # no blobs found so try again with a lower threshold
     pf.thresh = 0
     pf.find_blobs()
     blob_thresh = max(threshold_otsu(pf.blobs[:, 3]), num_frames / 10)
-    pf.blobs = pf.blobs[pf.blobs[:,3] > blob_thresh]
+    pf.blobs = pf.blobs[pf.blobs[:, 3] > blob_thresh]
     if diagnostics:
         pf.plot_blobs(**kwargs)
     if not pf.blobs.size:
@@ -1218,7 +1218,7 @@ def _gen_img_sub_threaded(yx_shape, df, mag, multipliers, diffraction_limit, num
     return lazy_result.sum(0)
 
 
-def gen_img(yx_shape, df, mag=10, cmap="gist_rainbow", weight="amp", diffraction_limit=False, numthreads=1):
+def gen_img(yx_shape, df, mag=10, cmap="gist_rainbow", weight=None, diffraction_limit=False, numthreads=1, hist=False):
     """Generate a 2D image, optionally with z color coding
 
     Parameters
@@ -1237,6 +1237,8 @@ def gen_img(yx_shape, df, mag=10, cmap="gist_rainbow", weight="amp", diffraction
         "amp" and "nphotons"
     numthreads : int
         The number of threads to use during rendering. (Experimental)
+    hist : bool
+        Whether to use gaussian rendering or histogram
 
     Returns
     -------
@@ -1246,32 +1248,53 @@ def gen_img(yx_shape, df, mag=10, cmap="gist_rainbow", weight="amp", diffraction
         the last axis is RGBA. the A channel is just the intensity
         It will not have gamma or clipping applied.
     """
+    if hist:
+        # generate the bins for the histogram
+        bins = [np.arange(0, dim + 1.0 / mag, 1 / mag) - 1 / mag / 2 for dim in yx_shape]
+        # there's no weighting by amplitude or anything here
+        w = np.ones(len(df))
+
+        def func(weights):
+            """This is the histogram function"""
+            
+            @dask.delayed
+            def lazy_hist(sample, bins=10, range=None, normed=False, weights=None):
+                return np.histogramdd(sample, bins, range, normed, weights)[0]
+            
+            l = lazy_hist(df[["y0", "x0"]].values, bins, weights=weights)
+            return dask.array.from_delayed(l, np.array(yx_shape) * mag, np.float)
+    else:
+        # here want to weight by sigma_z just like we do with sigmas when generating the gaussians
+        w = (1 / (np.sqrt(2 * np.pi)) / df["sigma_z"]).values
+
+        def func(weights):
+            """This is the gaussian renderer"""
+            return _gen_img_sub_threaded(yx_shape, df, mag, weights, diffraction_limit, numthreads)
+
     # Generate the intensity image
-    w = 1 / (np.sqrt(2 * np.pi)) / df["sigma_z"]
-    img = _gen_img_sub_threaded(yx_shape, df, mag, w.values, numthreads)
+    img_w = func(w)
     if cmap is not None:
         # calculate the weighting for each localization
         if weight is not None:
-            w *= df[weight]
+            w *= df[weight].values
         # normalize z into the range of 0 to 1
         norm_z = scale(df["z0"].values)
         # Calculate weighted colors for each z position
-        wz = (w.values[:, None] * matplotlib.cm.get_cmap(cmap)(norm_z))
+        wz = (w[:, None] * matplotlib.cm.get_cmap(cmap)(norm_z))
         # generate the weighted r, g, anb b images
-        args = yx_shape, df, mag
-        args2 = diffraction_limit, numthreads
-        img_wz_r = _gen_img_sub_threaded(*args, wz[:, 0], *args2)
-        img_wz_g = _gen_img_sub_threaded(*args, wz[:, 1], *args2)
-        img_wz_b = _gen_img_sub_threaded(*args, wz[:, 2], *args2)
-        img_w = _gen_img_sub_threaded(*args, w.values, *args2)
+        img_wz_r = func(wz[:, 0])
+        img_wz_g = func(wz[:, 1])
+        img_wz_b = func(wz[:, 2])
         # combine the images and divide by weights to get a depth-coded RGB image
         rgb = dask.array.dstack((img_wz_r, img_wz_g, img_wz_b)) / img_w[..., None]
+        # where weight is 0, replace with 0
+        rgb[~np.isfinite(rgb)] = 0
         # add on the alpha img
-        rgba = dask.array.dstack((rgb, img))
+        rgba = dask.array.dstack((rgb, img_w))
         return DepthCodedImage(rgba.compute(), cmap, mag, (df["z0"].min(), df["z0"].max()))
     else:
         # just return the alpha.
-        return img.compute()
+        return img_w.compute()
 
 
 class DepthCodedImage(np.ndarray):
