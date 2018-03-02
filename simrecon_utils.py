@@ -1465,7 +1465,7 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
         total_save_path = outname.replace(
             '.mrc', extension)
         Mrc.save(recon_split_data_combine,
-                 total_save_path,
+                 os.path.abspath(total_save_path),
                  hdr=temp_mrc.hdr,
                  ifExists='overwrite')
         # clean up
