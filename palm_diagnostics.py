@@ -396,11 +396,13 @@ class PALMData(object):
     """A simple class to manipulate peakselector data"""
     # columns we want to keep
 
-    def __init__(self, path_to_sav, verbose=False):
+    def __init__(self, path_to_sav, verbose=False, processed_only=False):
         """To initialize the experiment we need to know where the raw data is
         and where the peakselector processed data is
         
         Assumes paths_to_raw are properly sorted"""
+
+        # add gaussian widths
         
         self.peak_col = {
             'X Position': "x0",
@@ -444,10 +446,11 @@ class PALMData(object):
             self.group_col.update(d)
         # 
         self.processed = raw_df[list(self.peak_col.keys())]
-        self.grouped = grouped_peaks(raw_df)[list(self.group_col.keys())]
         # normalize column names
         self.processed = self.processed.rename(columns=self.peak_col)
-        self.grouped = self.grouped.rename(columns=self.group_col)
+        if not processed_only:
+            self.grouped = grouped_peaks(raw_df)[list(self.group_col.keys())]
+            self.grouped = self.grouped.rename(columns=self.group_col)
 
     def filter_peaks(self, offset=1000, sigma_max=3, nphotons=0, groupsize=5000):
         """Filter internal dataframes"""
