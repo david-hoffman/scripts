@@ -435,22 +435,27 @@ class PALMData(object):
         raw_df = peakselector_df(path_to_sav, verbose=verbose)
         # the dummy attribute won't stick around after casting, so pull it now.
         self.totalrawdata = raw_df.totalrawdata
-        raw_df = raw_df.astype(float)
-        # convert Frame number to int
-        int_cols = ['Frame Number', '24 Group Size', 'Label Set']
-        raw_df[int_cols] = raw_df[int_cols].astype(int)
-        # don't discard label column if it's being used
+         # don't discard label column if it's being used
+        int_cols = ['frame']
         if raw_df["Label Set"].unique().size > 1:
             d = {"Label Set": "label"}
+            int_cols += ['label']
             self.peak_col.update(d)
             self.group_col.update(d)
-        # 
-        self.processed = raw_df[list(self.peak_col.keys())]
+        # convert to float
+        self.processed = raw_df[list(self.peak_col.keys())].astype(float)
         # normalize column names
         self.processed = self.processed.rename(columns=self.peak_col)
+        self.processed[int_cols] = self.processed[int_cols].astype(int)
         if not processed_only:
-            self.grouped = grouped_peaks(raw_df)[list(self.group_col.keys())]
+            int_cols += ['groupsize']
+            self.grouped = grouped_peaks(raw_df)[list(self.group_col.keys())].astype(float)
             self.grouped = self.grouped.rename(columns=self.group_col)
+            self.grouped[int_cols] = self.grouped[int_cols].astype(int)
+        # ccollect garbage
+        gc.collect()
+
+
 
     def filter_peaks(self, offset=1000, sigma_max=3, nphotons=0, groupsize=5000):
         """Filter internal dataframes"""
