@@ -33,8 +33,7 @@ from skimage.filters import threshold_triangle
 import scipy.ndimage as ndi
 
 from scipy.optimize import curve_fit
-from pyPALM.drift import (remove_xy_mean, calc_drift, calc_fiducial_stats, find_fiducials,
-                          extract_fiducials, remove_drift)
+from pyPALM.drift import *
 from pyPALM.render import gen_img, save_img_3d
 
 from scipy.spatial import cKDTree
@@ -414,7 +413,8 @@ class PALMData(object):
             'Sigma Z': "sigma_z",
             'Z Position': 'z0',
             'Offset': 'offset',
-            'Amplitude': 'amp'
+            'Amplitude': 'amp',
+            'ChiSquared': "chi2"
         }
 
         self.group_col = {
@@ -428,7 +428,8 @@ class PALMData(object):
             '24 Group Size': 'groupsize',
             'Group Z Position': 'z0',
             'Offset': 'offset',
-            'Amplitude': 'amp'
+            'Amplitude': 'amp',
+            'ChiSquared': "chi2"
         }
 
         # load peakselector data
