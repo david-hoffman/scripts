@@ -10,6 +10,7 @@ Copyright (c) 2016, David Hoffman
 import click
 from scipy.constants import Avogadro, pi
 
+
 def good_N(ci,M, Nf = 5e10):
     '''
     This function is for converting a dye solution into desired number of particles.
@@ -34,6 +35,7 @@ def good_N(ci,M, Nf = 5e10):
     7.888e+06
     '''
     return ci/(M*1e3)/Nf*Avogadro
+
     
 def num_particles(concentration, diameter, rho=1.05):
     '''
@@ -60,9 +62,11 @@ def num_particles(concentration, diameter, rho=1.05):
     '''
     return 6 * concentration * 1e12 / (rho * pi * diameter**3)
 
+
 def calc_molarity(num_part):
     """Convert number of particles per mL to pico molarity""" 
     return num_part * 1000 / Avogadro / 1e-12
+
 
 @click.group('name')
 def main():
@@ -76,6 +80,7 @@ def main():
         density of beads in g/mL (default: 1.05 for polystyrene)"""
     pass
 
+
 def sub_molarity(diameter, concentration, rho):
     """Calculate the molarity of solution"""
     num_part = num_particles(concentration, diameter, rho=rho)
@@ -84,12 +89,14 @@ def sub_molarity(diameter, concentration, rho):
                    "g/mL you have a {:.3f} pM solution").format(diameter, concentration, mol))
     return mol
 
+
 @main.command()
 @click.argument('diameter', type=float)
 @click.argument('concentration', type=float)
 @click.option('--rho', default=1.05, type=float)
 def molarity(diameter, concentration, rho):
     sub_molarity(diameter, concentration, rho)
+
 
 @main.command()
 @click.argument('diameter', type=float)

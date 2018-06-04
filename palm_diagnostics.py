@@ -34,6 +34,9 @@ import scipy.ndimage as ndi
 
 from scipy.optimize import curve_fit
 from pyPALM.drift import *
+from pyPALM.utils import *
+from pyPALM.registration import *
+from pyPALM.grouping import *
 from pyPALM.render import gen_img, save_img_3d
 
 from scipy.spatial import cKDTree
@@ -809,7 +812,6 @@ def log_bins(data, nbins=128):
     minmax = np.nanmin(data), np.nanmax(data)
     logminmax = np.log10(minmax)
     return np.logspace(*logminmax, num=nbins)
-
 
 
 def measure_peak_widths(y):
