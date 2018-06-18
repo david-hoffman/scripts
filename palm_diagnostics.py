@@ -34,6 +34,7 @@ import scipy.ndimage as ndi
 
 from scipy.optimize import curve_fit
 from pyPALM.drift import *
+from pyPALM.grouping import *
 from pyPALM.render import gen_img, save_img_3d
 
 from scipy.spatial import cKDTree
