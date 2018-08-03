@@ -37,7 +37,7 @@ from pyPALM.drift import *
 from pyPALM.utils import *
 from pyPALM.registration import *
 from pyPALM.grouping import *
-from pyPALM.render import gen_img, save_img_3d
+from pyPALM.render import gen_img, save_img_3d, tif_convert
 
 from scipy.spatial import cKDTree
 
@@ -87,7 +87,7 @@ def filter_fiducials(df, blobs, radius):
     We're doing it sequentially because we may run out of memory.
     If initial DataFrame is 18 GB (1 GB per column) and we have 200 """
     blob_filt = pd.Series(np.ones(len(df)), index=df.index, dtype=bool)
-    for i, (y, x) in enumerate(tqdm.tqdm_notebook(blobs, leave=False, desc="Filtering Fiducials")):
+    for i, (y, x) in enumerate(tqdm.tqdm(blobs, leave=False, desc="Filtering Fiducials")):
         bead_filter = np.sqrt((df.x0 - x) ** 2 + (df.y0 - y) ** 2) > radius
         blob_filt &= bead_filter
         del bead_filter
@@ -254,7 +254,10 @@ def make_lazy_data(paths, read_all_shapes=False):
 
     Assumes all data is of same shape and type."""
     if read_all_shapes:
-        data = [dask.array.from_delayed(lazy_imread(path), **_get_tif_info(path)) for path in tqdm.tqdm_notebook(paths)]
+        # reading all the paths is super slow, speed it up with threaded reads
+        # seems fair to assume that bottleneck is IO so threads should be fine.
+        tif_info = dask.delayed([dask.delayed(_get_tif_info)(path) for path in paths]).compute()
+        data = [dask.array.from_delayed(lazy_imread(path), **info) for info, path in zip(tif_info, paths)]
         data_array = dask.array.concatenate(data)
     else:
         # read first image for shape
@@ -394,15 +397,43 @@ def auto_z(palm_df, min_dist=0, max_dist=np.inf, nbins=128, diagnostics=False):
     return z_mins
 
 
+def mortensen(df, a2=1.0):
+    """Calculate the mortensen precision of the emitter
+
+    https://www.nature.com/articles/nmeth.1447 (https://doi.org/10.1038/nmeth.1447)
+
+    a2 is the area of the pixel, as the widths are in pixels this should be 1"""
+    var_n = (df[["width_x", "width_y"]] ** 2).div(df.nphotons, "index")
+    # b^2 in the paper is the background photon count _not_ the background photon count squared ...
+    b2 = df.offset
+    new_var = var_n * (16 / 9 + 8 * np.pi * var_n.mul(b2, "index") / a2)
+    new_std = np.sqrt(new_var)
+    new_std.columns = "mort_x", "mort_y"
+    return pd.concat((df, new_std), axis=1)
+
+
 class PALMData(object):
     """A simple class to manipulate peakselector data"""
     # columns we want to keep
 
-    def __init__(self, path_to_sav, verbose=False, processed_only=False):
+    def __init__(self, path_to_sav, verbose=False, processed_only=False, include_width=False):
         """To initialize the experiment we need to know where the raw data is
         and where the peakselector processed data is
         
-        Assumes paths_to_raw are properly sorted"""
+        Assumes paths_to_raw are properly sorted
+
+
+        array(['Offset', 'Amplitude', 'X Position', 'Y Position', 'X Peak Width',
+               'Y Peak Width', '6 N Photons', 'ChiSquared', 'FitOK',
+               'Frame Number', 'Peak Index of Frame', '12 X PkW * Y PkW',
+               'Sigma X Pos rtNph', 'Sigma Y Pos rtNph', 'Sigma X Pos Full',
+               'Sigma Y Pos Full', '18 Grouped Index', 'Group X Position',
+               'Group Y Position', 'Group Sigma X Pos', 'Group Sigma Y Pos',
+               'Group N Photons', '24 Group Size', 'Frame Index in Grp',
+               'Label Set', 'XY Ellipticity', 'Z Position', 'Sigma Z',
+               'XY Group Ellipticity', 'Group Z Position', 'Group Sigma Z'],
+              dtype='<U20')
+        """
 
         # add gaussian widths
         
@@ -419,6 +450,14 @@ class PALMData(object):
             'Amplitude': 'amp',
             'ChiSquared': "chi2"
         }
+
+        if include_width:
+            self.peak_col.update(
+                    {
+                        'X Peak Width': "width_x",
+                        'Y Peak Width': "width_y",
+                    }
+                )
 
         self.group_col = {
             'Frame Number': 'frame',
@@ -515,8 +554,11 @@ class PALMData(object):
 
     def filter_peaks_and_beads(self, peak_kwargs, fiducial_kwargs, filter_z_kwargs):
         """Filter individual localizations and remove fiducials"""
+        print("Starting filtering peaks")
         self.filter_peaks(**peak_kwargs)
+        print("Removing fiducials")
         self.remove_fiducials(**fiducial_kwargs)
+        print("Filtering z")
         self.filter_z(**filter_z_kwargs)
 
     def remove_fiducials(self, yx_shape, subsampling=1, exclusion_radius=1, **kwargs):
@@ -554,7 +596,7 @@ class PALMData(object):
             df = df[df.frame > frame]
             for ax, attr, mult in zip(sub_axs, ("sigma_x", "sigma_y", "sigma_z"), (130, 130, 1)):
                 dat = (df[attr] * mult)
-                dat.hist(ax=ax, bins="auto", normed=True)
+                dat.hist(ax=ax, bins="auto", density=True)
                 ax.set_title("{} $\{}$".format(dtype.capitalize(), attr))
                 add_line(ax, dat)
                 add_line(ax, dat, np.median, color=ax.lines[-1].get_color(), linestyle="--")
@@ -765,7 +807,8 @@ class PALMExperiment(object):
         raw_counts = self.palm.raw_counts.loc[self.nofeedbackframes:]
         # number of photons per frame
         nphotons = self.palm.filtered_frame.nphotons.mean()
-        # contrast after feedback is enabeled
+        # contrast after feedback is enabled
+        # shouldn't contrast be average nphotons normalized by background or something?
         contrast = (nphotons.loc[self.nofeedbackframes:] / self.nphotons.max())
         raw_counts.index = raw_counts.index * self.timestep
         contrast.index = contrast.index * self.timestep
