@@ -1,5 +1,5 @@
 # # PALM Blinking and Decay Analysis
-# The purpose of this notebook is to analyze PALM diagnostic data in a consistent way across data sets. 
+# The purpose of this notebook is to analyze PALM diagnostic data in a consistent way across data sets.
 # The basic experiment being analyzed here is data that has been reactivated and deactivated multiple times.
 
 import gc
@@ -270,7 +270,10 @@ class RawImages(object):
     """A container for lazy raw images"""
     
     def __init__(self, paths_to_raw, read_all_shapes=False):
-        self.raw = make_lazy_data(paths_to_raw, read_all_shapes=read_all_shapes)
+        if isinstance(paths_to_raw, dask.array.core.Array):
+            self.raw = paths_to_raw
+        else:
+            self.raw = make_lazy_data(paths_to_raw, read_all_shapes=read_all_shapes)
 
     def __len__(self):
         return len(self.raw)
@@ -301,8 +304,8 @@ class RawImages(object):
             ax0.set_title("Unmasked")
             ax1.set_title("Masked")
             for ax in (ax0, ax1):
-                ax.grid("off")
-                ax.axis("off")
+                ax.grid(False)
+                ax.axis(False)
         
         # we just made the mask so we should recompute the masked_mean if requested again
         try:
@@ -321,19 +324,19 @@ class RawImages(object):
     @cached_property
     def mean(self):
         """return the mean of lazy_data"""
-        return self.raw.astype(float).mean((1, 2)).compute(get=dask.multiprocessing.get)
+        return self.raw.mean((1, 2)).compute()
 
     @cached_property
     def mean_img(self):
         """return the mean of lazy_data"""
-        return self.raw.astype(float).mean(0).compute(get=dask.multiprocessing.get)
+        return self.raw.mean(0).compute()
 
     @cached_property
     def masked_mean(self):
         """return the masked mean"""
         raw_reshape = self.raw.reshape(self.raw.shape[0], -1)
         raw_masked = raw_reshape[:, self.mask.ravel()]
-        return raw_masked.astype(float).mean(1).compute(get=dask.multiprocessing.get)
+        return raw_masked.mean(1).compute()
 
     @property
     def raw_sum(self):
@@ -410,6 +413,67 @@ def mortensen(df, a2=1.0):
     new_std = np.sqrt(new_var)
     new_std.columns = "mort_x", "mort_y"
     return pd.concat((df, new_std), axis=1)
+
+
+def bin_by_photons(blob, nphotons):
+    # order by z, so that we group things that are near each other in frames (even if they're in different slabs)
+    # this also, conveniently, makes a copy of the DF
+    blob = blob.sort_values("frame")
+
+    # Calculate the total number of photons and then the bin edges
+    # such that the bins each have n photons in them
+    total_nphotons = blob.nphotons.sum()
+    bins = np.arange(0, total_nphotons, nphotons)
+
+    # break the DF into groups with n photons
+    blob2 = blob.assign(group_id=blob.groupby(pd.cut(blob.nphotons.cumsum(), bins)).grouper.group_info[0])
+    # group and calculate the mortensent precision 
+    return agg_groups(blob2)
+
+
+def mort(gdata, scale, bg):
+    return (gdata - bg) / scale
+
+
+def calc_precision(blob, nphotons=np.logspace(3.5, 5, 32)):
+    # set up data structures
+    # experimental precision
+    expt = []
+    # mortensen precision
+    mort = []
+    for n in nphotons:
+        blob3 = bin_by_photons(blob, n)
+        expt.append(blob3[["x0", "y0", "z0"]].std())
+        mort.append(blob3[["sigma_x", "sigma_y", "sigma_z", "mort_x", "mort_y"]].mean())
+        
+        # expt.append(blob3[["x0", "y0"]].std())
+        # mort.append(blob3[["mort_x", "mort_y"]].mean())
+        
+    expt_df = pd.DataFrame(expt, index=nphotons)
+    mort_df = pd.DataFrame(mort, index=nphotons)
+    precision_df = pd.concat((expt_df, mort_df), 1)
+    return precision_df
+
+
+def fit_precision(precision_df, diagnostics=True):
+    fits = {}
+    if diagnostics:
+        fig, (ax, ax0, ax1) = plt.subplots(1, 3)
+        precision_df.drop(["sigma_z", "z0"], axis=1).plot(ax=ax0)
+        precision_df[["sigma_z", "z0"]].plot(ax=ax)
+        
+        # precision_df.plot(ax=ax0)
+    for c in "xy":
+        expt_df, mort_df = precision_df[c + "0"], precision_df["mort_" + c]
+        popt, pcov = curve_fit(mort, expt_df, mort_df, p0=(2, 0.05))
+        fits[c + "_scale"] = popt[0]
+        fits[c + "_offset"] = popt[1]
+        if diagnostics:
+            mort(expt_df, *popt).plot(ax=ax1)
+            
+    if diagnostics:
+        precision_df[["mort_x", "mort_y"]].plot(ax=ax1)
+    return fits
 
 
 class PALMData(object):
@@ -635,35 +699,68 @@ def exponent(xdata, amp, rate, offset):
 
 
 class Data405(object):
-    
-    def __init__(self, path):
-        self.data = pd.read_csv(path, index_col=0, parse_dates=True)
-        self.data = self.data.rename(columns={k:k.split(" ")[0].lower() for k in self.data.keys()})
-        self.data['date_delta'] = (self.data.index - self.data.index.min())  / np.timedelta64(1,'D')
+    """An object encapsulating function's related to reactivation data"""
+    try:
+        calibration = pd.read_excel("../Aggregated 405 Calibration.xlsx")
+        from scipy.interpolate import interp1d
+        calibrate = interp1d(calibration["voltage"], calibration["mean"])
+        calibrated = True
+    except FileNotFoundError:
+        warnings.warn("Calibration not available ...")
+        
+        def calibrate(self, array):
+            """Do nothing with input"""
+            return array
+        calibrated = False
 
-    def fit(self, lower_limit):
+    def __init__(self, path):
+        """Read in data, normalize column names and set the time index"""
+        self.data = pd.read_csv(path, index_col=0, parse_dates=True)
+        self.data = self.data.rename(columns={k: k.split(" ")[0].lower() for k in self.data.keys()})
+        # convert voltage to power
+        self.data.reactivation = self.calibrate(self.data.reactivation)
+        # calculate date delta in hours
+        self.data['date_delta'] = (self.data.index - self.data.index.min()) / np.timedelta64(1, 'h')
+
+    def fit(self, lower_limit, upper_limit=None):
         # we know that the laser is subthreshold below 0.45 V and the max is 5 V, so we want to limit the data between these two
         data_df = self.data
-        data_df_crop = data_df[(data_df.reactivation > lower_limit) & (data_df.reactivation < 5)].dropna()
+        if upper_limit is None:
+            upper_limit = data_df.reactivation.max()
+        data_df_crop = data_df[(data_df.reactivation > lower_limit) & (data_df.reactivation < upper_limit)].dropna()
         self.popt, self.pcov = curve_fit(exponent, *data_df_crop[["date_delta", "reactivation"]].values.T)
         data_df["fit"] = exponent(data_df["date_delta"], *self.popt)
-        self.fit_win = data_df_crop.index.min(), data_df_crop.index.max()
+        self.fit_win = data_df_crop.date_delta.min(), data_df_crop.date_delta.max()
         
-    def plot(self, ax=None, limits=True, lower_limit=0.45):
+    def plot(self, ax=None, limits=True, lower_limit=0.45, upper_limit=None):
         if ax is None:
             fig, ax = plt.subplots()
         # check if enough data exists to fit
         if (self.data["reactivation"] > lower_limit).sum() > 100:
             # this is fast so no cost
-            self.fit(lower_limit)
-            self.data[["reactivation", "fit"]].plot(ax=ax)
-            ax.text(0.1, 0.5, "$y(t) = {:.3f} e^{{{:.3f}t}} + {:.3f}$".format(*self.popt), transform=ax.transAxes)
+            self.fit(lower_limit, upper_limit)
+            self.data.plot(x="date_delta", y=["reactivation", "fit"], ax=ax)
+            equation = "$y(t) = {:.3f} e^{{{:.3f}t}} + {:.3f}$".format(*self.popt)
+            tau = r"$\tau = {:.2f}$ hours".format(1 / self.popt[1])
+            ax.text(0.1, 0.5, "\n".join([equation, tau]), transform=ax.transAxes)
             if limits:
-                for edge in self.fit_win:
-                    ax.axvline(edge, color="r")
+                for i, edge in enumerate(self.fit_win):
+                    if i:
+                        label = "fit limits"
+                    else:
+                        label = None
+                    ax.axvline(edge, color="r", label=label)
         else:
             warnings.warn("Not enough data to fit")
-            self.data["reactivation"].plot(ax=ax)
+            self.data.plot(x="date_delta", y="reactivation", ax=ax)
+
+        ax.set_xlabel("Time (hours)")
+        if self.calibrated:
+            ax.set_ylabel("405 nm Power (mW)")
+        else:
+            ax.set_ylabel("405 nm Voltage")
+
+        ax.legend()
 
 
 ### Fit Functions
