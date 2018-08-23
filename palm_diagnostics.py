@@ -41,6 +41,10 @@ from pyPALM.render import gen_img, save_img_3d, tif_convert
 
 from scipy.spatial import cKDTree
 
+import logging
+
+logger = logging.getLogger()
+
 
 greys_alpha_cm = ListedColormap([(i / 255,) * 3 + ((255 - i) / 255,) for i in range(256)])
 
@@ -954,7 +958,7 @@ def log_bins(data, nbins=128):
     return np.logspace(*logminmax, num=nbins)
 
 
-def measure_peak_widths(y):
+def measure_peak_widths(trace):
     """Measure peak widths in thresholded data. 
 
     Parameters
@@ -967,43 +971,97 @@ def measure_peak_widths(y):
     widths : ndarray, 1d
         Measured widths of the peaks.
     """
-    d = np.diff(y)
-    i = np.arange(len(d))
-    rising_edges = i[d > 0]
-    falling_edges = i[d < 0]
-    # need to deal with all cases
-    # same number of edges
-    if len(rising_edges) == len(falling_edges):
-        if len(rising_edges) == 0:
-            return 0
-        # starting and ending with peak
-        # if falling edge is first we remove it
-        if falling_edges.min() < rising_edges.min():
-            widths = np.append(falling_edges, i[-1]) - np.append(0, rising_edges)
-        else:
-            # only peaks in the middle
-            widths = falling_edges - rising_edges
+    trace = np.asanyarray(trace)
+    # deal with all on or off
+    if (trace == 1).all():
+        logging.debug("All 1s")
+        widths = [len(trace)]
+    elif (trace == 0).all():
+        logging.debug("All 0s")
+        widths = [0]
     else:
-        # different number of edges
-        if len(rising_edges) < len(falling_edges):
-            # starting with peak
-            widths = falling_edges - np.append(0, rising_edges)
+        d = np.diff(trace)
+        i = np.arange(len(d))
+        rising_edges = i[d > 0]
+        falling_edges = i[d < 0]
+        # need to deal with all cases
+        # same number of edges
+        if len(rising_edges) == len(falling_edges):
+            logging.debug("same number of edges")
+            if len(rising_edges) == 0:
+                return 0
+            # starting and ending with peak
+            # if falling edge is first we remove it
+            if falling_edges.min() < rising_edges.min():
+                logging.debug("starting/ending with peak")
+                # if trace starts and ends with peak, then we need to add a falling edge
+                # at the end of the trace and a rising edge before the beginning
+                widths = np.append(falling_edges, i[-1] + 1) - np.append(-1, rising_edges)
+            else:
+                logging.debug("Peaks in middle")
+                # only peaks in the middle
+                widths = falling_edges - rising_edges
         else:
-            # ending with peak
-            widths = np.append(falling_edges, i[-1]) - rising_edges
-    return widths
+            # different number of edges
+            logging.debug("different number of edges")
+            if len(rising_edges) < len(falling_edges):
+                # starting with peak
+                logging.debug("starting with peak")
+                widths = falling_edges - np.append(0, rising_edges)
+                widths[0] += 1
+            else:
+                # ending with peak
+                logging.debug("ending with peak")
+                widths = np.append(falling_edges, i[-1] + 1) - rising_edges
+
+    return np.asarray(widths)
 
 
-def count_blinks(offtimes, gap):
-    """Count the number of blinkers based on offtimes and a fixed gap
+def _clear_zeros(a):
+    """Remove zeros from an array"""
+    a = np.asanyarray(a)
+    return a[a > 0]
 
-    ontimes = measure_peak_widths((y > 0) * 1
-    offtimes = measure_peak_widths((y == 0) * 1
 
-    """
-    breaks = np.nonzero(offtimes > gap)[0]
-    if breaks.size:
-        blinks = [offtimes[breaks[i] + 1:breaks[i+1]] for i in range(breaks.size - 1)]
-    else:
-        blinks = [offtimes]
-    return ([len(blink) for blink in blinks])
+def on_off_times(trace, trim=False):
+    """Measure on and off times for a trace, triming leading and trailing offtimes if requested"""
+    # make sure input is array
+    trace = np.asanyarray(trace)
+
+    # calculate on and offtimes
+    ontimes = measure_peak_widths((trace > 0) * 1)
+    offtimes = measure_peak_widths((trace == 0) * 1)
+
+    # user requested triming
+    if trim:
+        # if all off then clear arrays
+        if offtimes[0] == len(trace):
+            ontimes = offtimes = np.array([])
+        else:
+            # if we begin with 0 then trim first offtime
+            if trace[0] == 0:
+                start = 1
+            else:
+                start = 0
+            # if we end with zero then trim last offtime
+            if trace[-1] == 0:
+                end = -1
+            else:
+                end = None
+            offtimes = offtimes[start:end]
+    # clear zeros
+    return _clear_zeros(ontimes), _clear_zeros(offtimes)
+
+
+def count_blinks(onofftimes, gap):
+    """Count the number of blinkers based on offtimes and a fixed gap"""
+    # assume we pass the output of `on_off_times`
+    ontimes, offtimes = onofftimes
+    # count the number of gaps that are larger than gap - 1
+    # this is due to the grouping implementation
+    blinks = (offtimes >= gap - 1).sum()
+    # chack if there are more on times than off times (meaning peaks are at edges)
+    diff = len(ontimes) - len(offtimes)
+    if diff > 0:
+        blinks += diff
+    return blinks
