@@ -32,7 +32,7 @@ from skimage.filters import threshold_triangle
 # need ndimage
 import scipy.ndimage as ndi
 
-from scipy.optimize import curve_fit
+from dphutils import *
 from pyPALM.drift import *
 from pyPALM.utils import *
 from pyPALM.registration import *
@@ -40,6 +40,9 @@ from pyPALM.grouping import *
 from pyPALM.render import gen_img, save_img_3d, tif_convert
 
 from scipy.spatial import cKDTree
+
+# override any earlier imports
+from peaks.lm import curve_fit
 
 import logging
 
@@ -1065,3 +1068,112 @@ def count_blinks(onofftimes, gap):
     if diff > 0:
         blinks += diff
     return blinks
+
+
+def fit_power_law(x, y, maxiters=1, floor=0.1, upper_limit=None, lower_limit=None, include_offset=False):
+    """Fit power law to data, iteratively truncating long noisy tail if desired"""
+    # initialize iteration variables
+    all_popt = []
+    if lower_limit is None:
+        lower_limit = np.nonzero(x)[0][0]
+    # begin iteration
+    for i in range(maxiters):
+        # truncate data
+        s = slice(lower_limit, upper_limit)
+        yf, xf = y[s], x[s]
+        # if the first iteration estimate
+        if i < 1:
+            if include_offset:
+                # first find best fit for power law
+                popt_no_offset, ul = fit_power_law(x, y, maxiters=maxiters,
+                                                   floor=floor, upper_limit=upper_limit,
+                                                   lower_limit=lower_limit, include_offset=False)
+                # then estimate offset
+                popt = np.append(popt_no_offset, y[y > 0].mean())
+            else:
+                popt = estimate_power_law(xf, yf)
+        # fit truncated curve
+        popt, pcov = curve_fit(power_law, xf, yf, p0=popt, jac=power_law_jac, method="mle")
+        # append to list
+        all_popt.append(popt)
+        # check to see if we've converged
+        if any(np.allclose(old_popt, popt) for old_popt in all_popt[:-1]):
+            break
+        # if we're not looking for an offset update truncation factor
+        if not include_offset:
+            upper_limit = int(power_intercept(popt, floor))
+        else:
+            if popt[-1] < 0:
+                warnings.warn("offset less than 0, replacing with no offset params")
+                popt = popt_no_offset
+                break
+            upper_limit = int(power_intercept(popt[:2], popt[-1]))
+    else:
+        if maxiters > 1:
+            warnings.warn("Max iters reached")
+    return popt, upper_limit
+
+
+def fit_and_plot_power_law(trace, ul, offset, xmax, ll=None, ax=None):
+    """"""
+    # calculate histogram (get rid of 0 bin)
+    y = np.bincount(trace)[1:]
+    x = np.arange(len(y) + 1)[1:]
+
+    if ax is None:
+        fig, ax = plt.subplots(1)
+    popt, ul = fit_power_law(x, y, 10, include_offset=offset, upper_limit=ul, lower_limit=ll)
+
+    # build display equation
+    eqn = "$({:.2g})x^{{-{:.2f}}}"
+    if len(popt) > 2:
+        eqn += " + {:.2f}$"
+    else:
+        eqn += "$"
+
+    # plot on loglog plot
+    ax.loglog(x, y)
+
+    # build fit
+    ty = power_law(x, *popt)
+    ax.loglog(x, ty, label=eqn.format(*popt))
+    ax.set_ylim(ymin=np.log(2))
+    ax.set_xlim(xmax=xmax)
+    ax.legend()
+
+    # labeling
+    ax.set_ylabel("Occurences (#)")
+    ax.set_xlabel("Number of frames")
+
+    return plt.gcf(), ax, popt
+
+
+def plot_blinks(onofftimes, popt, max_frame, percentiles=(0.75, 0.9, 0.95), ax=None):
+    """Plot blinking events given on off times and fitted power law decay of off times"""
+    if ax is None:
+        fig, ax = plt.subplots(1)
+    for p in percentiles:
+        # calculate gap based on power law decay of offtimes.
+        gap = int(power_percentile(p, popt[:2]))
+        # if gap is greater than a quarter of all frames, limit to a quarter of all frames.
+        # and recalculate corresponding percentile
+        if gap > max_frame // 4:
+            gap = max_frame // 4
+            p = power_percentile_inv(gap, popt[:2])
+
+        # calculate teh number of events for each purported molecule
+        blinks = np.array([count_blinks(s, gap) for s in onofftimes])
+
+        # calculate histograms
+        x = np.arange(blinks.max() + 1)[1:]
+        y = np.bincount(blinks)[1:]
+
+        ax.step(x, y, label="p={:.2f}, gap={}\nPercent Trace = {:.1f}%\n$\mu$={:.2f}, $p_{{50^{{th}}}}$={}".format(p, gap, gap / max_frame * 100, blinks.mean(), int(np.median(blinks))))
+
+    ax.legend()
+    ax.set_xlim(xmin=0, xmax=50)
+    ax.set_ylabel("Occurences (#)")
+    ax.set_xlabel("# of events / molecule")
+    ax.set_title("# of Events for Different Grouping Gaps")
+
+    return plt.gcf(), ax
