@@ -44,6 +44,9 @@ from scipy.spatial import cKDTree
 # override any earlier imports
 from peaks.lm import curve_fit
 
+from scipy.sparse.csgraph import connected_components
+from scipy.sparse import csr_matrix
+
 import logging
 
 logger = logging.getLogger()
@@ -1026,6 +1029,10 @@ def _clear_zeros(a):
     return a[a > 0]
 
 
+def make_trace(f, max_frame):
+    return f.groupby("frame").size().reindex(np.arange(max_frame)).fillna(0).astype(int).values
+
+
 def on_off_times(trace, trim=False):
     """Measure on and off times for a trace, triming leading and trailing offtimes if requested"""
     # make sure input is array
@@ -1054,6 +1061,134 @@ def on_off_times(trace, trim=False):
             offtimes = offtimes[start:end]
     # clear zeros
     return _clear_zeros(ontimes), _clear_zeros(offtimes)
+
+
+def on_off_times_fast(df):
+    """Measure on and off times for a trace, triming leading and trailing offtimes if requested"""
+    # find all frames with more than one event
+    trace = np.sort(df.frame.unique())
+    # calculate the spacing between events
+    diff = np.append(1, np.diff(trace))
+    # getting off times directly is easy, just look at diff of frames
+    # and get rid of differences less than 2, i.e. the molecule
+    # has to actually turn off once, then minus 1 to correct for the next
+    # time it comes back one
+    off = diff[diff > 1] - 1
+    # I want to find places where the molecule switches state
+    # and sum between these points, so find the break points
+    # cumulative sum
+    # bincount to get on times
+    on = np.bincount((diff > 1).cumsum())
+    return on, off
+
+
+def fast_group(df, gap):
+    """Group data assuming that spatial bits have been taken care of"""
+    df = df.copy()
+    frame_diff = df.frame.diff()
+    df["group_id"] = (frame_diff >= gap).cumsum()
+    return df
+
+# distance finder based on finding more than one root in the derivative of the function
+def gauss2sum(xvec, muvec, sigvec):
+    """Modified sum of gaussians, with a change in variable to make the math easier"""
+    # arrayify
+    xvec, muvec, sigvec = np.asarray(xvec), np.asarray(muvec), np.asarray(sigvec)
+    ndim = xvec.ndim - 1
+    new_shape = muvec.shape + (1, ) * ndim
+    
+    muvec = muvec.reshape(new_shape)
+    sigvec = sigvec.reshape(new_shape)
+    
+    gauss1 = np.exp(-1/2 * (xvec ** 2).sum(0))
+    gauss2 = 1 / sigvec.prod() * np.exp(-1/2 * (((xvec - muvec) / sigvec) ** 2).sum(0))
+    return gauss1 + gauss2
+
+
+def gauss2sum_grad(xvec, muvec, sigvec):
+    """Modified sum of gaussians, with a change in variable to make the math easier"""
+    # arrayify
+    xvec, muvec, sigvec = np.asarray(xvec), np.asarray(muvec), np.asarray(sigvec)
+    ndim = xvec.ndim - 1
+    new_shape = muvec.shape + (1, ) * ndim
+    
+    muvec = muvec.reshape(new_shape)
+    sigvec = sigvec.reshape(new_shape)
+    
+    gauss1 = np.exp(-1/2 * (xvec ** 2).sum(0))
+    gauss2 = 1 / sigvec.prod() * np.exp(-1/2 * (((xvec - muvec) / sigvec) ** 2).sum(0))
+    
+    return -gauss1 * xvec - (xvec - muvec) / sigvec * gauss2
+
+
+def test_separation(df1, df2, min_sigma=0, coords="xy", diagnostics=False):
+    mus = [c + "0" for c in coords]
+    sigmas = ["sigma_" + c for c in coords]
+    sigvec = np.fmax(min_sigma, (df2[sigmas] / df1[sigmas]).values)
+    muvec = (df2[mus] - df1[mus]).values / df1[sigmas].values
+    args = (muvec, sigvec)
+    
+    init_guesses = [np.zeros_like(muvec), muvec / 2, muvec]
+    minima = [sciop.root(gauss2sum_grad, guess, args=args, options=dict(maxfev=25)) for guess in init_guesses]
+    pnts = np.array([m.x for m in minima if m.success])
+    if diagnostics:
+        m = np.amax(abs(muvec)) + np.amax(abs(sigvec))
+        yy, xx = np.meshgrid(np.linspace(-m,m), np.linspace(-m,m), indexing="ij")
+        fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(6, 3))
+        ax0.matshow(gauss2sum((yy, xx), *args), extent=(-m,m,m,-m))
+        ax1.matshow((gauss2sum_grad((yy, xx), *args)**2).sum(0), norm=LogNorm(), extent=(-m,m,m,-m))
+        pnts = np.array([m.x for m in minima if m.success])
+        
+        for ax in (ax0, ax1):
+            ax.scatter(*pnts.T[::-1])
+    # less than three critical points were found, therefore the
+    # two maxima are indistinguishable
+    if len(pnts) < 3:
+        return True
+    return any([np.allclose(pnts[0], pnts[1]), np.allclose(pnts[0], pnts[2]), np.allclose(pnts[1], pnts[2])])
+
+
+def test_separation_fast(mus, sigmas, coords="xy", diagnostics=False):
+    """"""
+    sigvec = sigmas[1] / sigmas[0]
+    muvec = (mus[1] - mus[0]) / sigmas[0]
+    args = (muvec, sigvec)
+    
+    init_guesses = [np.zeros_like(muvec), muvec / 2, muvec]
+    minima = [sciop.root(gauss2sum_grad, guess, args=args, options=dict(maxfev=25)) for guess in init_guesses]
+    
+    pnts = np.array([m.x for m in minima if m.success])
+    
+    # less than three critical points were found, therefore the
+    # two maxima are indistinguishable
+    if len(pnts) < 3:
+        return True
+    return any([np.allclose(pnts[0], pnts[1]), np.allclose(pnts[0], pnts[2]), np.allclose(pnts[1], pnts[2])])
+
+
+def make_matrix(df, min_sigma=0):
+    """Calculate adjacency matrix for df
+    
+    Assumes df is grouped"""
+    
+    # make adjacency matrix
+    n = len(df)
+    mat = np.zeros((n,n), dtype=bool)
+    
+    # fill it in, True, points are connected, false they aren't
+    
+    mus = df[["x0", "y0"]].values
+    Sigmas = np.fmax(min_sigma, df[["sigma_x", "sigma_y"]].values)
+    for s in itt.combinations(range(n), 2):
+        mat[s] = mat[s[::-1]] = test_separation_fast(mus[s, :], Sigmas[s, :])
+    return csr_matrix(mat)
+
+
+def count_connections(df, min_sigma=0, func=make_matrix):
+    """From the adjacency matrix find connected components in the resulting graph"""
+    cmat = func(df, min_sigma=min_sigma)
+    num_comp, labels = connected_components(cmat, directed=False)
+    return np.bincount(labels)
 
 
 def count_blinks(onofftimes, gap):
@@ -1176,4 +1311,40 @@ def plot_blinks(onofftimes, popt, max_frame, percentiles=(0.75, 0.9, 0.95), ax=N
     ax.set_xlabel("# of events / molecule")
     ax.set_title("# of Events for Different Grouping Gaps")
 
+    return plt.gcf(), ax
+
+
+def plot_blinks2(samples_blinks, popt, max_frame, percentiles=(0.9, 0.95, 0.99), min_sigma=0.0, ax=None):
+    """Plot blinking events given on off times and fitted power law decay of off times"""
+    if ax is None:
+        fig, ax = plt.subplots(1)
+    for p in percentiles:
+        # calculate gap based on power law decay of offtimes.
+        gap = int(pdiag.power_percentile(p, popt[:2]))
+        # if gap is greater than a quarter of all frames, limit to a quarter of all frames.
+        # and recalculate corresponding percentile
+        if gap > max_frame // 4:
+            gap = max_frame // 4
+            p = pdiag.power_percentile_inv(gap, popt[:2])
+            
+        # calculate teh number of events for each purported molecule
+        grouped = [dask.delayed(fast_group)(s, gap) for s in samples_blinks]
+        agg_groups = [dask.delayed(pdiag.agg_groups)(g) for g in grouped]
+        
+        regroup = dask.delayed([dask.delayed(count_connections)(agg, min_sigma) for agg in agg_groups])
+        with pdiag.pb:
+            blinks = np.concatenate(regroup.compute())
+
+        # calculate histograms
+        x = np.arange(blinks.max() + 1)[1:]
+        y = np.bincount(blinks)[1:]
+        label = "p={:.2f}, gap={}\nPercent Trace = {:.1f}%\n$\mu$={:.2f}, $p_{{50^{{th}}}}$={}".format(p, gap, gap / max_frame * 100, blinks.mean(), int(np.median(blinks)))
+        ax.step(x, y/y.sum(), label=label, where="mid")
+        
+    ax.legend()
+    ax.set_xlim(xmin=0, xmax=50)
+    ax.set_ylabel("Frequency")
+    ax.set_xlabel("# of events / molecule")
+    ax.set_title("# of Events for Different Grouping Gaps")
+    
     return plt.gcf(), ax
