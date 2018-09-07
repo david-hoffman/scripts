@@ -26,6 +26,8 @@ import tqdm
 # Need partial
 from functools import partial
 
+import itertools as itt
+
 # need otsu
 from skimage.filters import threshold_triangle
 
@@ -44,8 +46,7 @@ from scipy.spatial import cKDTree
 # override any earlier imports
 from peaks.lm import curve_fit
 
-from scipy.sparse.csgraph import connected_components
-from scipy.sparse import csr_matrix
+from sklearn.cluster import AffinityPropagation
 
 import logging
 
@@ -106,60 +107,6 @@ def filter_fiducials(df, blobs, radius):
     gc.collect()
     df = df[blob_filt]
     return df
-
-
-def prune_peaks(peaks, radius):
-        """
-        Pruner method takes blobs list with the third column replaced by
-        intensity instead of sigma and then removes the less intense blob
-        if its within diameter of a more intense blob.
-
-        Parameters
-        ----------
-        peaks : pandas DataFrame
-        diameter : float
-            Allowed spacing between blobs
-
-        Returns
-        -------
-        A : ndarray
-            `array` with overlapping blobs removed.
-        """
-
-        # make a copy of blobs otherwise it will be changed
-        # create the tree
-        kdtree = cKDTree(peaks[["y0", "x0"]].values)
-        # query all pairs of points within diameter of each other
-        list_of_conflicts = list(kdtree.query_pairs(radius))
-        # sort the collisions by max amplitude of the pair
-        # we want to deal with collisions between the largest
-        # blobs and nearest neighbors first:
-        # Consider the following sceneario in 1D
-        # A-B-C
-        # are all the same distance and colliding with amplitudes
-        # A > B > C
-        # if we start with the smallest, both B and C will be discarded
-        # If we start with the largest, only B will be
-        # Sort in descending order
-        list_of_conflicts.sort(
-            key=lambda x: max(peaks.amp.iloc[x[0]], peaks.amp.iloc[x[1]]),
-            reverse=True
-        )
-        # indices of pruned blobs
-        pruned_peaks = set()
-        # loop through conflicts
-        for idx_a, idx_b in list_of_conflicts:
-            # see if we've already pruned one of the pair
-            if (idx_a not in pruned_peaks) and (idx_b not in pruned_peaks):
-                # compare based on amplitude
-                if peaks.amp.iloc[idx_a] > peaks.amp.iloc[idx_b]:
-                    pruned_peaks.add(idx_b)
-                else:
-                    pruned_peaks.add(idx_a)
-        # return pruned dataframe
-        return peaks.iloc[[
-            i for i in range(len(peaks)) if i not in pruned_peaks]
-        ]
 
 
 def remove_fiducials(df, yx_shape, df2=None, exclusion_radius=1, **kwargs):
@@ -965,7 +912,7 @@ def log_bins(data, nbins=128):
 
 
 def measure_peak_widths(trace):
-    """Measure peak widths in thresholded data. 
+    """Measure peak widths in thresholded data.
 
     Parameters
     ----------
@@ -1089,106 +1036,70 @@ def fast_group(df, gap):
     df["group_id"] = (frame_diff >= gap).cumsum()
     return df
 
-# distance finder based on finding more than one root in the derivative of the function
-def gauss2sum(xvec, muvec, sigvec):
-    """Modified sum of gaussians, with a change in variable to make the math easier"""
-    # arrayify
-    xvec, muvec, sigvec = np.asarray(xvec), np.asarray(muvec), np.asarray(sigvec)
-    ndim = xvec.ndim - 1
-    new_shape = muvec.shape + (1, ) * ndim
-    
-    muvec = muvec.reshape(new_shape)
-    sigvec = sigvec.reshape(new_shape)
-    
-    gauss1 = np.exp(-1/2 * (xvec ** 2).sum(0))
-    gauss2 = 1 / sigvec.prod() * np.exp(-1/2 * (((xvec - muvec) / sigvec) ** 2).sum(0))
-    return gauss1 + gauss2
+
+def bhattacharyya(mus, sigmas):
+    """Calculate the Bhattacharyya distance between two normal distributions
+    with diagonal covariance matrices
+    https://en.wikipedia.org/wiki/Bhattacharyya_distance"""
+    # convert sigmas in vars
+    s1, s2 = sigmas**2
+    m1, m2 = mus
+    m = m1 - m2
+    s = (s1 + s2) / 2
+    # we assume covariance is diagnonal
+    part1 = 1 / 8 * m ** 2 / s
+    part2 = 1 / 2 * np.log(s.prod() / np.sqrt(s1.prod() * s2.prod()))
+    return part1.sum() + part2
 
 
-def gauss2sum_grad(xvec, muvec, sigvec):
-    """Modified sum of gaussians, with a change in variable to make the math easier"""
-    # arrayify
-    xvec, muvec, sigvec = np.asarray(xvec), np.asarray(muvec), np.asarray(sigvec)
-    ndim = xvec.ndim - 1
-    new_shape = muvec.shape + (1, ) * ndim
+def make_matrix(df, min_sigma=0, coords="xy"):
+    """Calculate distance matrix for df
     
-    muvec = muvec.reshape(new_shape)
-    sigvec = sigvec.reshape(new_shape)
+    Each entry is the Bhattacharyya distance between the two
+    probability distributions defined by the grouped SMLM events
+    """
     
-    gauss1 = np.exp(-1/2 * (xvec ** 2).sum(0))
-    gauss2 = 1 / sigvec.prod() * np.exp(-1/2 * (((xvec - muvec) / sigvec) ** 2).sum(0))
-    
-    return -gauss1 * xvec - (xvec - muvec) / sigvec * gauss2
-
-
-def test_separation(df1, df2, min_sigma=0, coords="xy", diagnostics=False):
-    mus = [c + "0" for c in coords]
-    sigmas = ["sigma_" + c for c in coords]
-    sigvec = np.fmax(min_sigma, (df2[sigmas] / df1[sigmas]).values)
-    muvec = (df2[mus] - df1[mus]).values / df1[sigmas].values
-    args = (muvec, sigvec)
-    
-    init_guesses = [np.zeros_like(muvec), muvec / 2, muvec]
-    minima = [sciop.root(gauss2sum_grad, guess, args=args, options=dict(maxfev=25)) for guess in init_guesses]
-    pnts = np.array([m.x for m in minima if m.success])
-    if diagnostics:
-        m = np.amax(abs(muvec)) + np.amax(abs(sigvec))
-        yy, xx = np.meshgrid(np.linspace(-m,m), np.linspace(-m,m), indexing="ij")
-        fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(6, 3))
-        ax0.matshow(gauss2sum((yy, xx), *args), extent=(-m,m,m,-m))
-        ax1.matshow((gauss2sum_grad((yy, xx), *args)**2).sum(0), norm=LogNorm(), extent=(-m,m,m,-m))
-        pnts = np.array([m.x for m in minima if m.success])
-        
-        for ax in (ax0, ax1):
-            ax.scatter(*pnts.T[::-1])
-    # less than three critical points were found, therefore the
-    # two maxima are indistinguishable
-    if len(pnts) < 3:
-        return True
-    return any([np.allclose(pnts[0], pnts[1]), np.allclose(pnts[0], pnts[2]), np.allclose(pnts[1], pnts[2])])
-
-
-def test_separation_fast(mus, sigmas, coords="xy", diagnostics=False):
-    """"""
-    sigvec = sigmas[1] / sigmas[0]
-    muvec = (mus[1] - mus[0]) / sigmas[0]
-    args = (muvec, sigvec)
-    
-    init_guesses = [np.zeros_like(muvec), muvec / 2, muvec]
-    minima = [sciop.root(gauss2sum_grad, guess, args=args, options=dict(maxfev=25)) for guess in init_guesses]
-    
-    pnts = np.array([m.x for m in minima if m.success])
-    
-    # less than three critical points were found, therefore the
-    # two maxima are indistinguishable
-    if len(pnts) < 3:
-        return True
-    return any([np.allclose(pnts[0], pnts[1]), np.allclose(pnts[0], pnts[2]), np.allclose(pnts[1], pnts[2])])
-
-
-def make_matrix(df, min_sigma=0):
-    """Calculate adjacency matrix for df
-    
-    Assumes df is grouped"""
-    
-    # make adjacency matrix
+    # make distance matrix
     n = len(df)
-    mat = np.zeros((n,n), dtype=bool)
+    mat = np.zeros((n,n))
     
-    # fill it in, True, points are connected, false they aren't
-    
-    mus = df[["x0", "y0"]].values
-    Sigmas = np.fmax(min_sigma, df[["sigma_x", "sigma_y"]].values)
+    # fill it in
+    # pull data from DataFrame first, speeds up operations    
+    mus = df[[c + "0" for c in coords]].values
+    Sigmas = np.fmax(min_sigma, df[["sigma_" + c for c in coords]].values)
     for s in itt.combinations(range(n), 2):
-        mat[s] = mat[s[::-1]] = test_separation_fast(mus[s, :], Sigmas[s, :])
-    return csr_matrix(mat)
+        mat[s] = mat[s[::-1]] = bhattacharyya(mus[s, :], Sigmas[s, :])
+    return mat
 
 
-def count_connections(df, min_sigma=0, func=make_matrix):
-    """From the adjacency matrix find connected components in the resulting graph"""
-    cmat = func(df, min_sigma=min_sigma)
-    num_comp, labels = connected_components(cmat, directed=False)
-    return np.bincount(labels)
+def cluster_groups(df, *args, affinity="similarity", diagnostics=False, **kwargs):
+    """Cluster grouped localizations based on distance matrix (Bhattacharyya)"""
+    # If there's only one point return
+    if len(df) < 2:
+        return np.array([len(df)])
+
+    # make the distance matrix
+    mat = make_matrix(df, *args, **kwargs)
+    
+    # choose which metric to use
+    if affinity == "distance":
+        amat = np.exp(np.exp(-mat) - 1)
+    else:
+        amat = np.exp(-mat**2)
+
+    # cluster the data
+    aff = AffinityPropagation(affinity="precomputed")
+    aff.fit(amat)
+
+    # output diagnostics if wanted
+    if diagnostics:
+        df_c = df.copy()
+        df_c["group_id"] = aff.labels_
+        fig, ax = plt.subplots()
+        ax.scatter(df_c.x0, df_c.y0, c=df_c.group_id, s=df_c.sigma_z, edgecolor="k", cmap="tab10", vmax=10)
+
+    # return the new number of blinks.
+    return np.bincount(aff.labels_)
 
 
 def count_blinks(onofftimes, gap):
@@ -1198,14 +1109,14 @@ def count_blinks(onofftimes, gap):
     # count the number of gaps that are larger than gap - 1
     # this is due to the grouping implementation
     blinks = (offtimes >= gap - 1).sum()
-    # chack if there are more on times than off times (meaning peaks are at edges)
+    # check if there are more on times than off times (meaning peaks are at edges)
     diff = len(ontimes) - len(offtimes)
     if diff > 0:
         blinks += diff
     return blinks
 
 
-def fit_power_law(x, y, maxiters=1, floor=0.1, upper_limit=None, lower_limit=None, include_offset=False):
+def fit_power_law(x, y, maxiters=100, floor=0.1, upper_limit=None, lower_limit=None, include_offset=False):
     """Fit power law to data, iteratively truncating long noisy tail if desired"""
     # initialize iteration variables
     all_popt = []
@@ -1267,7 +1178,7 @@ def fit_and_plot_power_law(trace, ul, offset, xmax, ll=None, ax=None):
         eqn += "$"
 
     # plot on loglog plot
-    ax.loglog(x, y)
+    ax.loglog(x, y, linestyle="steps-mid")
 
     # build fit
     ty = power_law(x, *popt)
@@ -1320,19 +1231,19 @@ def plot_blinks2(samples_blinks, popt, max_frame, percentiles=(0.9, 0.95, 0.99),
         fig, ax = plt.subplots(1)
     for p in percentiles:
         # calculate gap based on power law decay of offtimes.
-        gap = int(pdiag.power_percentile(p, popt[:2]))
+        gap = int(power_percentile(p, popt[:2]))
         # if gap is greater than a quarter of all frames, limit to a quarter of all frames.
         # and recalculate corresponding percentile
         if gap > max_frame // 4:
             gap = max_frame // 4
-            p = pdiag.power_percentile_inv(gap, popt[:2])
+            p = power_percentile_inv(gap, popt[:2])
             
         # calculate teh number of events for each purported molecule
         grouped = [dask.delayed(fast_group)(s, gap) for s in samples_blinks]
-        agg_groups = [dask.delayed(pdiag.agg_groups)(g) for g in grouped]
+        agg_groups = [dask.delayed(agg_groups)(g) for g in grouped]
         
-        regroup = dask.delayed([dask.delayed(count_connections)(agg, min_sigma) for agg in agg_groups])
-        with pdiag.pb:
+        regroup = dask.delayed([dask.delayed(cluster_groups)(agg, min_sigma, coords="xyz") for agg in agg_groups])
+        with pb:
             blinks = np.concatenate(regroup.compute())
 
         # calculate histograms
@@ -1348,3 +1259,67 @@ def plot_blinks2(samples_blinks, popt, max_frame, percentiles=(0.9, 0.95, 0.99),
     ax.set_title("# of Events for Different Grouping Gaps")
     
     return plt.gcf(), ax
+
+
+def prune_blobs(df, radius):
+        """
+        Pruner method takes blobs list with the third column replaced by
+        intensity instead of sigma and then removes the less intense blob
+        if its within diameter of a more intense blob.
+
+        Adapted from _prune_blobs in skimage.feature.blob
+
+        Parameters
+        ----------
+        blobs : ndarray
+            A 2d array with each row representing 3 values,
+            `(y, x, intensity)` where `(y, x)` are coordinates
+            of the blob and `intensity` is the intensity of the
+            blob (value at (x, y)).
+        diameter : float
+            Allowed spacing between blobs
+
+        Returns
+        -------
+        A : ndarray
+            `array` with overlapping blobs removed.
+        """
+
+        # make a copy of blobs otherwise it will be changed
+        # create the tree
+        blobs = df[["x0", "y0", "amp"]].values
+        kdtree = cKDTree(blobs[:, :2])
+        # query all pairs of points within diameter of each other
+        list_of_conflicts = list(kdtree.query_pairs(radius))
+        # sort the collisions by max amplitude of the pair
+        # we want to deal with collisions between the largest
+        # blobs and nearest neighbors first:
+        # Consider the following sceneario in 1D
+        # A-B-C
+        # are all the same distance and colliding with amplitudes
+        # A > B > C
+        # if we start with the smallest, both B and C will be discarded
+        # If we start with the largest, only B will be
+        # Sort in descending order
+        list_of_conflicts.sort(
+            key=lambda x: max(blobs[x[0], -1], blobs[x[1], -1]),
+            reverse=True
+        )
+        # indices of pruned blobs
+        pruned_blobs = set()
+        # loop through conflicts
+        for idx_a, idx_b in list_of_conflicts:
+            # see if we've already pruned one of the pair
+            if (idx_a not in pruned_blobs) and (idx_b not in pruned_blobs):
+                # compare based on amplitude
+                if blobs[idx_a, -1] > blobs[idx_b, -1]:
+                    pruned_blobs.add(idx_b)
+                else:
+                    pruned_blobs.add(idx_a)
+        # generate the pruned list
+        # pruned_blobs_set = {(blobs[i, 0], blobs[i, 1])
+        #                         for i in pruned_blobs}
+        # set internal blobs array to blobs_array[blobs_array[:, 2] > 0]
+        return df.iloc[[
+            i for i in range(len(blobs)) if i not in pruned_blobs
+        ]]
