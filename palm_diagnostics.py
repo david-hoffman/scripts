@@ -42,6 +42,7 @@ from pyPALM.grouping import *
 from pyPALM.render import gen_img, save_img_3d, tif_convert
 
 from scipy.spatial import cKDTree
+from scipy.stats import poisson
 
 # override any earlier imports
 from peaks.lm import curve_fit
@@ -66,6 +67,7 @@ def peakselector_df(path, verbose=False):
     df = pd.DataFrame(sav["cgroupparams"].byteswap().newbyteorder(), columns=sav["rownames"].astype(str))
     df.totalrawdata = sav["totalrawdata"]
     return df
+
 
 pb = ProgressBar()
 
@@ -1087,6 +1089,8 @@ def cluster_groups(df, *args, affinity="similarity", diagnostics=False, **kwargs
     else:
         amat = np.exp(-mat**2)
 
+    amat[~np.isfinite(amat)] = 1e16
+
     # cluster the data
     aff = AffinityPropagation(affinity="precomputed")
     aff.fit(amat)
@@ -1099,7 +1103,12 @@ def cluster_groups(df, *args, affinity="similarity", diagnostics=False, **kwargs
         ax.scatter(df_c.x0, df_c.y0, c=df_c.group_id, s=df_c.sigma_z, edgecolor="k", cmap="tab10", vmax=10)
 
     # return the new number of blinks.
-    return np.bincount(aff.labels_)
+    if not np.isfinite(aff.labels_).all():
+        warnings.warn("Clustering failed")
+        return np.array([])
+
+    blinks = np.bincount(aff.labels_)
+    return blinks
 
 
 def count_blinks(onofftimes, gap):
@@ -1160,7 +1169,7 @@ def fit_power_law(x, y, maxiters=100, floor=0.1, upper_limit=None, lower_limit=N
     return popt, upper_limit
 
 
-def fit_and_plot_power_law(trace, ul, offset, xmax, ll=None, ax=None):
+def fit_and_plot_power_law(trace, ul, offset, xmax, ll=None, ax=None, density=False):
     """"""
     # calculate histogram (get rid of 0 bin)
     y = np.bincount(trace)[1:]
@@ -1171,94 +1180,82 @@ def fit_and_plot_power_law(trace, ul, offset, xmax, ll=None, ax=None):
     popt, ul = fit_power_law(x, y, 10, include_offset=offset, upper_limit=ul, lower_limit=ll)
 
     # build display equation
-    eqn = "$({:.2g})x^{{-{:.2f}}}"
+    eqn = r"$\alpha = {:.2f}"
     if len(popt) > 2:
-        eqn += " + {:.2f}$"
-    else:
-        eqn += "$"
-
-    # plot on loglog plot
-    ax.loglog(x, y, linestyle="steps-mid")
+        eqn += ", offset = {:.2f}"
+    eqn += "$"
 
     # build fit
     ty = power_law(x, *popt)
-    ax.loglog(x, ty, label=eqn.format(*popt))
-    ax.set_ylim(ymin=np.log(2))
-    ax.set_xlim(xmax=xmax)
-    ax.legend()
+    ymin = 0.5
+    if density:
+        N = len(trace)
+        y /= N
+        ty /= N
+        ymin /= N
 
+    # plot on loglog plot
+    ax.loglog(x, y, linestyle="steps-mid", label="Data")
+    ax.loglog(x, ty, label=eqn.format(*popt[1:]))
+    ax.set_ylim(ymin=ymin)
+
+    if ll:
+        ax.axvline(ll, color="y", linewidth=4, alpha=0.5, label="$x_{{min}} = {}$".format(ll))
+    if ul:
+        ax.axvline(ul, color="y", linewidth=4, alpha=0.5, label="$x_{{max}} = {}$".format(ul))
+    
     # labeling
-    ax.set_ylabel("Occurences (#)")
+    if not density:
+        ax.set_ylabel("Occurences (#)")
+    else:
+        ax.set_ylabel("Frequency")
     ax.set_xlabel("Number of frames")
 
     return plt.gcf(), ax, popt
 
 
-def plot_blinks(onofftimes, popt, max_frame, percentiles=(0.75, 0.9, 0.95), ax=None):
+def plot_blinks(gap, max_frame, onofftimes=None, samples_blinks=None, ax=None, min_sigma=0):
     """Plot blinking events given on off times and fitted power law decay of off times"""
     if ax is None:
         fig, ax = plt.subplots(1)
-    for p in percentiles:
-        # calculate gap based on power law decay of offtimes.
-        gap = int(power_percentile(p, popt[:2]))
-        # if gap is greater than a quarter of all frames, limit to a quarter of all frames.
-        # and recalculate corresponding percentile
-        if gap > max_frame // 4:
-            gap = max_frame // 4
-            p = power_percentile_inv(gap, popt[:2])
+        
+    # calculate the number of events for each purported molecule
+    if samples_blinks is not None:
+        grouped = [dask.delayed(fast_group)(s, gap) for s in samples_blinks]
+        aggs = [dask.delayed(agg_groups)(g) for g in grouped]
 
-        # calculate teh number of events for each purported molecule
+        regroup = dask.delayed([dask.delayed(cluster_groups)(agg, min_sigma, coords="xyz") for agg in aggs])
+        blinks = np.concatenate(regroup.compute())
+        prefix = "Corrected\n"
+    elif onofftimes is not None:
         blinks = np.array([count_blinks(s, gap) for s in onofftimes])
+        prefix = "Uncorrected\n"
+    else:
+        raise RuntimeError
+        
+    blinks = blinks.astype(int)
 
-        # calculate histograms
-        x = np.arange(blinks.max() + 1)[1:]
-        y = np.bincount(blinks)[1:]
+    # Fit to zero-truncated poisson
+    lam = fit_ztp(blinks)
 
-        ax.step(x, y, label="p={:.2f}, gap={}\nPercent Trace = {:.1f}%\n$\mu$={:.2f}, $p_{{50^{{th}}}}$={}".format(p, gap, gap / max_frame * 100, blinks.mean(), int(np.median(blinks))))
+    # calculate histograms
+    x = np.arange(blinks.max() + 1)[1:]
+    y = np.bincount(blinks)[1:]
+
+    label = prefix + "$\mu={:.2f}$, $p_{{50^{{th}}}}={}$, $\lambda={:.2f}$".format(blinks.mean(), int(np.median(blinks)), lam)
+    ax.step(x, y, label=label, where="mid")
+
+    # plot fit
+    fit = poisson(lam).pmf(x) / (1 - np.exp(-lam)) * y.sum()
+    ax.step(x, fit, where="mid", color="k", linestyle=":")
 
     ax.legend()
-    ax.set_xlim(xmin=0, xmax=50)
+    ax.set_xlim(xmin=0, xmax=30)
     ax.set_ylabel("Occurences (#)")
     ax.set_xlabel("# of events / molecule")
-    ax.set_title("# of Events for Different Grouping Gaps")
+    ax.set_title("Grouping Gap {}, Percent Trace = {:.1f}%".format(gap, gap / max_frame * 100))
 
-    return plt.gcf(), ax
-
-
-def plot_blinks2(samples_blinks, popt, max_frame, percentiles=(0.9, 0.95, 0.99), min_sigma=0.0, ax=None):
-    """Plot blinking events given on off times and fitted power law decay of off times"""
-    if ax is None:
-        fig, ax = plt.subplots(1)
-    for p in percentiles:
-        # calculate gap based on power law decay of offtimes.
-        gap = int(power_percentile(p, popt[:2]))
-        # if gap is greater than a quarter of all frames, limit to a quarter of all frames.
-        # and recalculate corresponding percentile
-        if gap > max_frame // 4:
-            gap = max_frame // 4
-            p = power_percentile_inv(gap, popt[:2])
-            
-        # calculate teh number of events for each purported molecule
-        grouped = [dask.delayed(fast_group)(s, gap) for s in samples_blinks]
-        agg_groups = [dask.delayed(agg_groups)(g) for g in grouped]
-        
-        regroup = dask.delayed([dask.delayed(cluster_groups)(agg, min_sigma, coords="xyz") for agg in agg_groups])
-        with pb:
-            blinks = np.concatenate(regroup.compute())
-
-        # calculate histograms
-        x = np.arange(blinks.max() + 1)[1:]
-        y = np.bincount(blinks)[1:]
-        label = "p={:.2f}, gap={}\nPercent Trace = {:.1f}%\n$\mu$={:.2f}, $p_{{50^{{th}}}}$={}".format(p, gap, gap / max_frame * 100, blinks.mean(), int(np.median(blinks)))
-        ax.step(x, y/y.sum(), label=label, where="mid")
-        
-    ax.legend()
-    ax.set_xlim(xmin=0, xmax=50)
-    ax.set_ylabel("Frequency")
-    ax.set_xlabel("# of events / molecule")
-    ax.set_title("# of Events for Different Grouping Gaps")
-    
-    return plt.gcf(), ax
+    return plt.gcf(), ax, blinks
 
 
 def prune_blobs(df, radius):
