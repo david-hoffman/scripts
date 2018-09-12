@@ -355,7 +355,7 @@ def auto_z(palm_df, min_dist=0, max_dist=np.inf, nbins=128, diagnostics=False):
     if diagnostics:
         for zz in z_mins:
             ax0.axvline(zz, color="r")
-            
+
     return z_mins
 
 
@@ -386,52 +386,86 @@ def bin_by_photons(blob, nphotons):
 
     # break the DF into groups with n photons
     blob2 = blob.assign(group_id=blob.groupby(pd.cut(blob.nphotons.cumsum(), bins)).grouper.group_info[0])
-    # group and calculate the mortensent precision 
-    return agg_groups(blob2)
+    # group and calculate the mortensen precision
+    # we recalc mortensen because the new agg has an average width and sum number of photons
+    blob2 = blob2.drop(["mort_x", "mort_y"], axis=1, errors="ignore")
+    return mortensen(agg_groups(blob2))
 
 
-def mort(gdata, scale, bg):
-    return (gdata - bg) / scale
+def scale_func(ydata, scale, bg):
+    """scale xdata to ydata"""
+    return scale * ydata + bg
 
 
-def calc_precision(blob, nphotons=np.logspace(3.5, 5, 32)):
+def calc_precision(blob, nphotons=None):
     # set up data structures
     # experimental precision
     expt = []
     # mortensen precision
     mort = []
+
+    #
+    if nphotons is None:
+        # total number of photons
+        total_photons = blob.nphotons.sum()
+        # at the end we want a single group
+        nphotons = np.linspace(blob.nphotons.max(), total_photons / 3, int(np.sqrt(len(blob))))
+        logger.debug("nphotons is {}".format(nphotons))
+
     for n in nphotons:
-        blob3 = bin_by_photons(blob, n)
-        expt.append(blob3[["x0", "y0", "z0"]].std())
-        mort.append(blob3[["sigma_x", "sigma_y", "sigma_z", "mort_x", "mort_y"]].mean())
-        
+        binned_blob = bin_by_photons(blob, n)
+        expt.append(binned_blob[["x0", "y0", "z0"]].std())
+        mort.append(binned_blob[["sigma_x", "sigma_y", "sigma_z", "mort_x", "mort_y"]].mean())
+
         # expt.append(blob3[["x0", "y0"]].std())
         # mort.append(blob3[["mort_x", "mort_y"]].mean())
-        
+
     expt_df = pd.DataFrame(expt, index=nphotons)
     mort_df = pd.DataFrame(mort, index=nphotons)
     precision_df = pd.concat((expt_df, mort_df), 1)
     return precision_df
 
 
-def fit_precision(precision_df, diagnostics=True):
+def fit_precision(precision_df, p0=(2, 0.05), diagnostics=True):
     fits = {}
+    fit_df = []
+    for c in "xyz":
+        types = "mort_", "sigma_"
+        if c == "z":
+            types = types[1:]
+        for t in types:
+            expt_df, calc_df = precision_df[c + "0"], precision_df[t + c]
+             
+            popt, pcov, _, _, _ = curve_fit(scale_func, calc_df, expt_df, p0=p0, bounds=(0, np.inf))
+
+            fits[t + c + "_scale"] = popt[0]
+            fits[t + c + "_offset"] = popt[1]
+            fit_df.append(scale_func(calc_df, *popt))
+
     if diagnostics:
-        fig, (ax, ax0, ax1) = plt.subplots(1, 3)
-        precision_df.drop(["sigma_z", "z0"], axis=1).plot(ax=ax0)
-        precision_df[["sigma_z", "z0"]].plot(ax=ax)
+        fit_df = pd.concat(fit_df, axis=1)
+        fig, ((ax_z, ax_fit_z), (ax_xy, ax_fit_xy)) = plt.subplots(2, 2, sharex=True, sharey="row", figsize=(9, 9))
         
-        # precision_df.plot(ax=ax0)
-    for c in "xy":
-        expt_df, mort_df = precision_df[c + "0"], precision_df["mort_" + c]
-        popt, pcov = curve_fit(mort, expt_df, mort_df, p0=(2, 0.05))
-        fits[c + "_scale"] = popt[0]
-        fits[c + "_offset"] = popt[1]
-        if diagnostics:
-            mort(expt_df, *popt).plot(ax=ax1)
-            
-    if diagnostics:
-        precision_df[["mort_x", "mort_y"]].plot(ax=ax1)
+        precision_df[["z0", "sigma_z"]].plot(ax=ax_z, style=":o")
+
+        precision_df[["z0"]].plot(ax=ax_fit_z, style=":o")
+        fit_df[["sigma_z"]].plot(ax=ax_fit_z, style=":o")
+        
+        precision_df[["x0", "y0"]].plot(ax=ax_xy, style=":o")
+        precision_df[["mort_x", "mort_y"]].plot(ax=ax_xy, style=":o")
+        precision_df[["sigma_x", "sigma_y"]].plot(ax=ax_xy, style=":o")
+        
+        precision_df[["x0", "y0"]].plot(ax=ax_fit_xy, style=":o")
+        fit_df[["mort_x", "mort_y", "sigma_x", "sigma_y"]].plot(ax=ax_fit_xy, style=":o")
+
+        ax_z.set_title("Data")
+        ax_fit_z.set_title("Fits")
+
+        ax_z.set_ylabel("Group Precision (nm)")
+        ax_fit_xy.set_ylabel("Group Precision (pixels)")
+
+        ax_fit_xy.set_xlabel("~# of Photons")
+        fig.tight_layout()
     return fits
 
 
@@ -442,9 +476,8 @@ class PALMData(object):
     def __init__(self, path_to_sav, verbose=False, processed_only=False, include_width=False):
         """To initialize the experiment we need to know where the raw data is
         and where the peakselector processed data is
-        
-        Assumes paths_to_raw are properly sorted
 
+        Assumes paths_to_raw are properly sorted
 
         array(['Offset', 'Amplitude', 'X Position', 'Y Position', 'X Peak Width',
                'Y Peak Width', '6 N Photons', 'ChiSquared', 'FitOK',
@@ -459,7 +492,7 @@ class PALMData(object):
         """
 
         # add gaussian widths
-        
+
         self.peak_col = {
             'X Position': "x0",
             'Y Position': "y0",
@@ -1063,7 +1096,7 @@ def make_matrix(df, min_sigma=0, coords="xy"):
     
     # make distance matrix
     n = len(df)
-    mat = np.zeros((n,n))
+    mat = np.zeros((n, n))
     
     # fill it in
     # pull data from DataFrame first, speeds up operations    
@@ -1074,7 +1107,7 @@ def make_matrix(df, min_sigma=0, coords="xy"):
     return mat
 
 
-def cluster_groups(df, *args, affinity="similarity", diagnostics=False, **kwargs):
+def cluster_groups(df, *args, affinity="distance", diagnostics=False, **kwargs):
     """Cluster grouped localizations based on distance matrix (Bhattacharyya)"""
     # If there's only one point return
     if len(df) < 2:
@@ -1085,11 +1118,12 @@ def cluster_groups(df, *args, affinity="similarity", diagnostics=False, **kwargs
     
     # choose which metric to use
     if affinity == "distance":
-        amat = np.exp(np.exp(-mat) - 1)
+        # amat = np.exp(np.exp(-mat) - 1)
+        amat = np.exp(-mat) - 1
     else:
         amat = np.exp(-mat**2)
 
-    amat[~np.isfinite(amat)] = 1e16
+    amat[~np.isfinite(amat)] = -1e16
 
     # cluster the data
     aff = AffinityPropagation(affinity="precomputed")
@@ -1169,7 +1203,7 @@ def fit_power_law(x, y, maxiters=100, floor=0.1, upper_limit=None, lower_limit=N
     return popt, upper_limit
 
 
-def fit_and_plot_power_law(trace, ul, offset, xmax, ll=None, ax=None, density=False):
+def fit_and_plot_power_law(trace, ul, offset, xmax, ll=None, ax=None, density=False, norm=False):
     """"""
     # calculate histogram (get rid of 0 bin)
     y = np.bincount(trace)[1:]
@@ -1188,9 +1222,14 @@ def fit_and_plot_power_law(trace, ul, offset, xmax, ll=None, ax=None, density=Fa
     # build fit
     ty = power_law(x, *popt)
     ymin = 0.5
-    if density:
-        N = len(trace)
-        y /= N
+    if density or norm:
+        if density:
+            N = len(trace)
+        elif norm:
+            N = y[0]
+        else:
+            raise RuntimeError("Shouldn't be here")
+        y = y / N
         ty /= N
         ymin /= N
 
@@ -1205,27 +1244,31 @@ def fit_and_plot_power_law(trace, ul, offset, xmax, ll=None, ax=None, density=Fa
         ax.axvline(ul, color="y", linewidth=4, alpha=0.5, label="$x_{{max}} = {}$".format(ul))
     
     # labeling
-    if not density:
-        ax.set_ylabel("Occurences (#)")
-    else:
+    if density:
         ax.set_ylabel("Frequency")
+    elif norm:
+        ax.set_ylabel("Fraction of Maximum")
+    else:
+        ax.set_ylabel("Occurences (#)")
     ax.set_xlabel("Number of frames")
 
-    return plt.gcf(), ax, popt
+    return plt.gcf(), ax, popt, ul
 
 
-def plot_blinks(gap, max_frame, onofftimes=None, samples_blinks=None, ax=None, min_sigma=0):
+def plot_blinks(gap, max_frame, onofftimes=None, samples_blinks=None, ax=None, min_sigma=0, coords="xyz", density=False):
     """Plot blinking events given on off times and fitted power law decay of off times"""
     if ax is None:
         fig, ax = plt.subplots(1)
         
     # calculate the number of events for each purported molecule
     if samples_blinks is not None:
+        samples_blinks = dask.compute(samples_blinks)[0]
+
         grouped = [dask.delayed(fast_group)(s, gap) for s in samples_blinks]
         aggs = [dask.delayed(agg_groups)(g) for g in grouped]
 
-        regroup = dask.delayed([dask.delayed(cluster_groups)(agg, min_sigma, coords="xyz") for agg in aggs])
-        blinks = np.concatenate(regroup.compute())
+        regroup = dask.delayed([dask.delayed(cluster_groups)(agg, min_sigma, coords=coords) for agg in aggs])
+        blinks = np.concatenate(regroup.compute(scheduler="processes"))
         prefix = "Corrected\n"
     elif onofftimes is not None:
         blinks = np.array([count_blinks(s, gap) for s in onofftimes])
@@ -1236,24 +1279,44 @@ def plot_blinks(gap, max_frame, onofftimes=None, samples_blinks=None, ax=None, m
     blinks = blinks.astype(int)
 
     # Fit to zero-truncated poisson
-    lam = fit_ztp(blinks)
-
+    for guess in itt.product(*[(0.1, 0.5, 1, 2, 3)]*2):
+        try:
+            alpha, mu = fit_ztnb(blinks, x0=guess)
+            # if successful fit, break
+            break
+        except RuntimeError as e:
+            err = e
+            continue
+    else:
+        raise err
     # calculate histograms
     x = np.arange(blinks.max() + 1)[1:]
     y = np.bincount(blinks)[1:]
-
-    label = prefix + "$\mu={:.2f}$, $p_{{50^{{th}}}}={}$, $\lambda={:.2f}$".format(blinks.mean(), int(np.median(blinks)), lam)
-    ax.step(x, y, label=label, where="mid")
+    # normalize
+    N = y.sum()
+    y = y / N
 
     # plot fit
-    fit = poisson(lam).pmf(x) / (1 - np.exp(-lam)) * y.sum()
+    fit = NegBinom(alpha, mu).pmf(x) / (1 - NegBinom(alpha, mu).pmf(0))
+
+    label = "$\mu_{{data}}={:.2f}$, $p_{{50^{{th}}}}={}$\n".format(blinks.mean(), int(np.median(blinks)))
+    label += r"$\alpha={:.2f}$, $\mu_{{\lambda}}={:.2f}$, $\sigma_{{\lambda}}={:.2f}$".format(alpha, mu, mu / np.sqrt(alpha))
+    label += "\nGap = {:g}, % Trace = {:.1%}".format(gap, gap / max_frame)
+    
+    if density:
+        ax.set_ylabel("Frequency")
+    else:
+        ax.set_ylabel("Occurences (#)")
+        fit = fit * N
+        y = y * N
+
+    ax.step(x, y, label=label, where="mid")
     ax.step(x, fit, where="mid", color="k", linestyle=":")
 
     ax.legend()
     ax.set_xlim(xmin=0, xmax=30)
-    ax.set_ylabel("Occurences (#)")
     ax.set_xlabel("# of events / molecule")
-    ax.set_title("Grouping Gap {}, Percent Trace = {:.1f}%".format(gap, gap / max_frame * 100))
+    ax.set_title("Long Term Blinking")
 
     return plt.gcf(), ax, blinks
 
