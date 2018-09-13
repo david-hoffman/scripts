@@ -46,6 +46,7 @@ from scipy.stats import poisson
 
 # override any earlier imports
 from peaks.lm import curve_fit
+from scipy.optimize import nnls
 
 from sklearn.cluster import AffinityPropagation
 
@@ -316,6 +317,7 @@ class RawImages(object):
         self.median_frames = np.median(self.raw[-num_frames:], 0)
         return self.median_frames[s].mean()
 
+
 def max_z(palm_df, nbins=128):
     """Get the most likely z"""
     hist, bins = np.histogram(palm_df.z0, bins=nbins)
@@ -325,12 +327,13 @@ def max_z(palm_df, nbins=128):
     max_z = z[hist.argmax()]
     return max_z
 
+
 def auto_z(palm_df, min_dist=0, max_dist=np.inf, nbins=128, diagnostics=False):
     """Automatically find good limits for z"""
     # make histogram
     hist, bins = np.histogram(palm_df.z0, bins=nbins)
     # calculate center of bins
-    z = np.diff(bins)/2 +bins[:-1]
+    z = np.diff(bins) / 2 + bins[:-1]
     # find the max z
     max_z = z[hist.argmax()]
     # calculate where the first derivative changes sign
@@ -397,6 +400,11 @@ def scale_func(ydata, scale, bg):
     return scale * ydata + bg
 
 
+def mort(xdata, scale, bg):
+    """scale xdata to ydata"""
+    return (xdata - bg) / scale
+
+
 def calc_precision(blob, nphotons=None):
     # set up data structures
     # experimental precision
@@ -409,7 +417,7 @@ def calc_precision(blob, nphotons=None):
         # total number of photons
         total_photons = blob.nphotons.sum()
         # at the end we want a single group
-        nphotons = np.linspace(blob.nphotons.max(), total_photons / 3, int(np.sqrt(len(blob))))
+        nphotons = np.linspace(blob.nphotons.max(), total_photons / 10, max(3, int(np.sqrt(len(blob)))))
         logger.debug("nphotons is {}".format(nphotons))
 
     for n in nphotons:
@@ -426,7 +434,15 @@ def calc_precision(blob, nphotons=None):
     return precision_df
 
 
-def fit_precision(precision_df, p0=(2, 0.05), diagnostics=True):
+def nnlr(xdata, ydata):
+    """Non-negative linear regression, a linear fit where both b and m are greater than zero"""
+    lhs = np.stack((xdata, np.ones_like(xdata)), -1)
+    rhs = ydata
+    (m, b), resid = nnls(lhs, rhs)
+    return m, b
+
+
+def fit_precision(precision_df, p0=(2, 0.05), diagnostics=False):
     fits = {}
     fit_df = []
     for c in "xyz":
@@ -435,8 +451,8 @@ def fit_precision(precision_df, p0=(2, 0.05), diagnostics=True):
             types = types[1:]
         for t in types:
             expt_df, calc_df = precision_df[c + "0"], precision_df[t + c]
-             
-            popt, pcov, _, _, _ = curve_fit(scale_func, calc_df, expt_df, p0=p0, bounds=(0, np.inf))
+
+            popt = nnlr(calc_df, expt_df)
 
             fits[t + c + "_scale"] = popt[0]
             fits[t + c + "_offset"] = popt[1]
@@ -445,16 +461,16 @@ def fit_precision(precision_df, p0=(2, 0.05), diagnostics=True):
     if diagnostics:
         fit_df = pd.concat(fit_df, axis=1)
         fig, ((ax_z, ax_fit_z), (ax_xy, ax_fit_xy)) = plt.subplots(2, 2, sharex=True, sharey="row", figsize=(9, 9))
-        
+
         precision_df[["z0", "sigma_z"]].plot(ax=ax_z, style=":o")
 
         precision_df[["z0"]].plot(ax=ax_fit_z, style=":o")
         fit_df[["sigma_z"]].plot(ax=ax_fit_z, style=":o")
-        
+
         precision_df[["x0", "y0"]].plot(ax=ax_xy, style=":o")
         precision_df[["mort_x", "mort_y"]].plot(ax=ax_xy, style=":o")
         precision_df[["sigma_x", "sigma_y"]].plot(ax=ax_xy, style=":o")
-        
+
         precision_df[["x0", "y0"]].plot(ax=ax_fit_xy, style=":o")
         fit_df[["mort_x", "mort_y", "sigma_x", "sigma_y"]].plot(ax=ax_fit_xy, style=":o")
 
@@ -465,6 +481,7 @@ def fit_precision(precision_df, p0=(2, 0.05), diagnostics=True):
         ax_fit_xy.set_ylabel("Group Precision (pixels)")
 
         ax_fit_xy.set_xlabel("~# of Photons")
+        ax_xy.set_xlabel("~# of Photons")
         fig.tight_layout()
     return fits
 
@@ -1368,7 +1385,7 @@ def prune_blobs(df, radius):
         # indices of pruned blobs
         pruned_blobs = set()
         # loop through conflicts
-        for idx_a, idx_b in list_of_conflicts:
+        for idx_a, idx_b in tqdm.tqdm(list_of_conflicts):
             # see if we've already pruned one of the pair
             if (idx_a not in pruned_blobs) and (idx_b not in pruned_blobs):
                 # compare based on amplitude
