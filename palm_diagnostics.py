@@ -4,6 +4,8 @@
 
 import gc
 import warnings
+import datetime
+import re
 import numpy as np
 import pandas as pd
 # regular plotting
@@ -28,12 +30,10 @@ from functools import partial
 
 import itertools as itt
 
-# need otsu
-from skimage.filters import threshold_triangle
-
 # need ndimage
 import scipy.ndimage as ndi
 
+import dphplotting as dplt
 from dphutils import *
 from pyPALM.drift import *
 from pyPALM.utils import *
@@ -49,6 +49,9 @@ from peaks.lm import curve_fit
 from scipy.optimize import nnls
 
 from sklearn.cluster import AffinityPropagation
+from skimage.filters import thresholding
+
+from copy import copy
 
 import logging
 
@@ -56,6 +59,10 @@ logger = logging.getLogger()
 
 
 greys_alpha_cm = ListedColormap([(i / 255,) * 3 + ((255 - i) / 255,) for i in range(256)])
+
+greys_limit = copy(plt.cm.Greys_r)
+greys_limit.set_over('r', 1.0)
+greys_limit.set_under('b', 1.0)
 
 
 def peakselector_df(path, verbose=False):
@@ -201,13 +208,47 @@ class memoize(object):
 
 
 # Lazy functions for raw data handling
-lazy_imread = dask.delayed(tif.imread, pure=True)
+@dask.delayed(pure=True)
+def lazy_imread(path):
+    with warnings.catch_warnings():
+        # ignore warnings
+        warnings.simplefilter("ignore")
+        return tif.imread(path)
+
 
 def _get_tif_info(path):
     """Get the tifffile shape with the least amount of work"""
-    with tif.TiffFile(path) as mytif:
-        s = mytif.series[0]
+    with warnings.catch_warnings():
+        # ignore warnings
+        warnings.simplefilter("ignore")
+        with tif.TiffFile(path) as mytif:
+            s = mytif.series[0]
     return dict(shape=s.shape, dtype=s.dtype)
+
+
+def get_labview_metadata(txtfile):
+    """Get metadata from labview generated text files as dictionary
+
+    Currently only gets date"""
+
+    rx_dict = {
+        "date": re.compile(r"(?<=Date :\t).+"),
+        "num_imgs": re.compile(r"(?<=# of Imgs :\t)\d+")
+    }
+
+    process_dict = {
+        "date": lambda x: datetime.datetime.strptime(x, '%m/%d/%Y %I:%M:%S %p'),
+        "num_imgs": int
+    }
+    with open(txtfile, "r") as f:
+        # load all text
+        # not efficient but expedient
+        full_text = "\n".join(f.readlines())
+
+    # date = datetime.datetime.strptime(datestr.split("\t")[1][:-1], '%m/%d/%Y %I:%M:%S %p')
+    match_dict = {k: v.search(full_text) for k, v in rx_dict.items()}
+    return {k: process_dict[k](v.group()) for k, v in match_dict.items()}
+
 
 def make_lazy_data(paths, read_all_shapes=False):
     """Make a lazy data array from a set of paths to data
@@ -216,24 +257,63 @@ def make_lazy_data(paths, read_all_shapes=False):
     if read_all_shapes:
         # reading all the paths is super slow, speed it up with threaded reads
         # seems fair to assume that bottleneck is IO so threads should be fine.
-        tif_info = dask.delayed([dask.delayed(_get_tif_info)(path) for path in paths]).compute()
+        tif_info = dask.delayed([dask.delayed(_get_tif_info)(path) for path in paths]).compute(scheduler="processes")
         data = [dask.array.from_delayed(lazy_imread(path), **info) for info, path in zip(tif_info, paths)]
         data_array = dask.array.concatenate(data)
     else:
         # read first image for shape
-        sample = _get_tif_info(paths[0])
-        data = [dask.array.from_delayed(lazy_imread(path), **sample) for path in paths]
+        tif_info = _get_tif_info(paths[0])
+        data = [dask.array.from_delayed(lazy_imread(path), **tif_info) for path in paths]
         data_array = dask.array.concatenate(data)
-    return data_array
+        # extend to be same shape as data
+        tif_info = [tif_info] * len(paths)
+    return data_array, tif_info
+
 
 class RawImages(object):
     """A container for lazy raw images"""
-    
+
     def __init__(self, paths_to_raw, read_all_shapes=False):
         if isinstance(paths_to_raw, dask.array.core.Array):
             self.raw = paths_to_raw
         else:
-            self.raw = make_lazy_data(paths_to_raw, read_all_shapes=read_all_shapes)
+            self.raw, tif_meta = make_lazy_data(paths_to_raw, read_all_shapes=read_all_shapes)
+
+        # get date times
+        def switch_to_txt(path):
+            """switch from tif path to txt path"""
+            dname, fname = os.path.split(path)
+            split = fname.split("_")
+            prefix = "_".join(split[:4])
+            return os.path.join(dname, prefix + "_Settings.txt")
+
+        metadata_paths = map(switch_to_txt, paths_to_raw)
+        metadata = map(lambda x: get_labview_metadata(x), metadata_paths)
+
+        # update meta data with tif data
+        assert len(tif_meta) == len(paths_to_raw), "Paths and meta data don't match"
+        metadata = [{**x, **y} for x, y in zip(metadata, tif_meta)]
+
+        # get the frame numbers
+        frame_num = np.array([m["shape"][0] for m in metadata])
+        frame_num = frame_num.cumsum() - frame_num[0]
+        # now we can set up our datetimes
+        date_series = pd.Series(
+            # data is the date
+            data=[m["date"] for m in metadata],
+            # index is the first frame
+            index=pd.Int64Index(frame_num, name="frame"),
+            name="Timestamp"
+        )
+
+        # expand to full index
+        date_series = date_series.reindex(pd.RangeIndex(len(self.raw)))
+        # convert dates to ints and then floats (need float for NaN)
+        date_series2 = date_series.astype('i8').astype('f8')
+        # replace bad values with NaN
+        date_series2[date_series.isnull()] = np.nan
+        # interpolate and convert back to datetime
+        self.date_series = pd.to_datetime(date_series2.interpolate("slinear", fill_value="extrapolate"))
 
     def __len__(self):
         return len(self.raw)
@@ -246,14 +326,14 @@ class RawImages(object):
         # get the median last frames
         # last_frames = last_frames_temp = np.median(self.raw[frames], 0)
         # last_frames = last_frames_temp = self.mean_img
-        init_mask = self.mean_img > threshold_triangle(self.mean_img)
+        init_mask = self.mean_img > thresholding.threshold_triangle(self.mean_img)
         # for i in range(iters):
         #     init_mask = last_frames_temp > threshold_triangle(last_frames_temp)
         #     last_frames_temp[~init_mask] = mode(last_frames_temp.astype(int))
-        
+
         # the beads/fiducials are high, so we want to negate here
         mask = ~ndi.binary_dilation(init_mask, **dilation_kwargs)
-        
+
         if diagnostics:
             plot_kwargs = dict(norm=PowerNorm(0.25), vmax=1000, vmin=100, cmap="inferno")
             if isinstance(diagnostics, dict):
@@ -266,16 +346,15 @@ class RawImages(object):
             for ax in (ax0, ax1):
                 ax.grid(False)
                 ax.axis(False)
-        
+
         # we just made the mask so we should recompute the masked_mean if requested again
         try:
             del self.masked_mean
         except AttributeError:
             # masked_mean doesn't exist yet so don't worry
             pass
-        
-        self.mask = mask
 
+        self.mask = mask
 
     @cached_property
     def shape(self):
@@ -284,7 +363,8 @@ class RawImages(object):
     @cached_property
     def mean(self):
         """return the mean of lazy_data"""
-        return self.raw.mean((1, 2)).compute()
+        mymean = self.raw.mean((1, 2)).compute()
+        return pd.Series(data=mymean, index=self.date_series, name="raw_mean")
 
     @cached_property
     def mean_img(self):
@@ -296,7 +376,8 @@ class RawImages(object):
         """return the masked mean"""
         raw_reshape = self.raw.reshape(self.raw.shape[0], -1)
         raw_masked = raw_reshape[:, self.mask.ravel()]
-        return raw_masked.mean(1).compute()
+        raw_masked = raw_masked.mean(1).compute()
+        return pd.Series(data=raw_masked, index=self.date_series, name="masked_mean")
 
     @property
     def raw_sum(self):
@@ -322,7 +403,7 @@ def max_z(palm_df, nbins=128):
     """Get the most likely z"""
     hist, bins = np.histogram(palm_df.z0, bins=nbins)
     # calculate center of bins
-    z = np.diff(bins)/2 + bins[:-1]
+    z = np.diff(bins) / 2 + bins[:-1]
     # find the max z
     max_z = z[hist.argmax()]
     return max_z
@@ -345,11 +426,11 @@ def auto_z(palm_df, min_dist=0, max_dist=np.inf, nbins=128, diagnostics=False):
         ax2.plot(z, grad)
     # where the sign goes from negative to positive
     # is where minima are located
-    concave = np.where(grad ==1)[0]
+    concave = np.where(grad == 1)[0]
     # order minima according to distance from max
     i = np.diff(np.sign((z[concave] - max_z))).argmax()
     # the two closest are our best bets
-    z_mins = z[concave[i:i+2]]
+    z_mins = z[concave[i:i + 2]]
     # enforce limits
     z_mins_min = np.array((-max_dist, min_dist)) + max_z
     z_mins_max = np.array((-min_dist, max_dist)) + max_z
@@ -360,130 +441,6 @@ def auto_z(palm_df, min_dist=0, max_dist=np.inf, nbins=128, diagnostics=False):
             ax0.axvline(zz, color="r")
 
     return z_mins
-
-
-def mortensen(df, a2=1.0):
-    """Calculate the mortensen precision of the emitter
-
-    https://www.nature.com/articles/nmeth.1447 (https://doi.org/10.1038/nmeth.1447)
-
-    a2 is the area of the pixel, as the widths are in pixels this should be 1"""
-    var_n = (df[["width_x", "width_y"]] ** 2).div(df.nphotons, "index")
-    # b^2 in the paper is the background photon count _not_ the background photon count squared ...
-    b2 = df.offset
-    new_var = var_n * (16 / 9 + 8 * np.pi * var_n.mul(b2, "index") / a2)
-    new_std = np.sqrt(new_var)
-    new_std.columns = "mort_x", "mort_y"
-    return pd.concat((df, new_std), axis=1)
-
-
-def bin_by_photons(blob, nphotons):
-    # order by z, so that we group things that are near each other in frames (even if they're in different slabs)
-    # this also, conveniently, makes a copy of the DF
-    blob = blob.sort_values("frame")
-
-    # Calculate the total number of photons and then the bin edges
-    # such that the bins each have n photons in them
-    total_nphotons = blob.nphotons.sum()
-    bins = np.arange(0, total_nphotons, nphotons)
-
-    # break the DF into groups with n photons
-    blob2 = blob.assign(group_id=blob.groupby(pd.cut(blob.nphotons.cumsum(), bins)).grouper.group_info[0])
-    # group and calculate the mortensen precision
-    # we recalc mortensen because the new agg has an average width and sum number of photons
-    blob2 = blob2.drop(["mort_x", "mort_y"], axis=1, errors="ignore")
-    return mortensen(agg_groups(blob2))
-
-
-def scale_func(ydata, scale, bg):
-    """scale xdata to ydata"""
-    return scale * ydata + bg
-
-
-def mort(xdata, scale, bg):
-    """scale xdata to ydata"""
-    return (xdata - bg) / scale
-
-
-def calc_precision(blob, nphotons=None):
-    # set up data structures
-    # experimental precision
-    expt = []
-    # mortensen precision
-    mort = []
-
-    #
-    if nphotons is None:
-        # total number of photons
-        total_photons = blob.nphotons.sum()
-        # at the end we want a single group
-        nphotons = np.linspace(blob.nphotons.max(), total_photons / 10, max(3, int(np.sqrt(len(blob)))))
-        logger.debug("nphotons is {}".format(nphotons))
-
-    for n in nphotons:
-        binned_blob = bin_by_photons(blob, n)
-        expt.append(binned_blob[["x0", "y0", "z0"]].std())
-        mort.append(binned_blob[["sigma_x", "sigma_y", "sigma_z", "mort_x", "mort_y"]].mean())
-
-        # expt.append(blob3[["x0", "y0"]].std())
-        # mort.append(blob3[["mort_x", "mort_y"]].mean())
-
-    expt_df = pd.DataFrame(expt, index=nphotons)
-    mort_df = pd.DataFrame(mort, index=nphotons)
-    precision_df = pd.concat((expt_df, mort_df), 1)
-    return precision_df
-
-
-def nnlr(xdata, ydata):
-    """Non-negative linear regression, a linear fit where both b and m are greater than zero"""
-    lhs = np.stack((xdata, np.ones_like(xdata)), -1)
-    rhs = ydata
-    (m, b), resid = nnls(lhs, rhs)
-    return m, b
-
-
-def fit_precision(precision_df, p0=(2, 0.05), diagnostics=False):
-    fits = {}
-    fit_df = []
-    for c in "xyz":
-        types = "mort_", "sigma_"
-        if c == "z":
-            types = types[1:]
-        for t in types:
-            expt_df, calc_df = precision_df[c + "0"], precision_df[t + c]
-
-            popt = nnlr(calc_df, expt_df)
-
-            fits[t + c + "_scale"] = popt[0]
-            fits[t + c + "_offset"] = popt[1]
-            fit_df.append(scale_func(calc_df, *popt))
-
-    if diagnostics:
-        fit_df = pd.concat(fit_df, axis=1)
-        fig, ((ax_z, ax_fit_z), (ax_xy, ax_fit_xy)) = plt.subplots(2, 2, sharex=True, sharey="row", figsize=(9, 9))
-
-        precision_df[["z0", "sigma_z"]].plot(ax=ax_z, style=":o")
-
-        precision_df[["z0"]].plot(ax=ax_fit_z, style=":o")
-        fit_df[["sigma_z"]].plot(ax=ax_fit_z, style=":o")
-
-        precision_df[["x0", "y0"]].plot(ax=ax_xy, style=":o")
-        precision_df[["mort_x", "mort_y"]].plot(ax=ax_xy, style=":o")
-        precision_df[["sigma_x", "sigma_y"]].plot(ax=ax_xy, style=":o")
-
-        precision_df[["x0", "y0"]].plot(ax=ax_fit_xy, style=":o")
-        fit_df[["mort_x", "mort_y", "sigma_x", "sigma_y"]].plot(ax=ax_fit_xy, style=":o")
-
-        ax_z.set_title("Data")
-        ax_fit_z.set_title("Fits")
-
-        ax_z.set_ylabel("Group Precision (nm)")
-        ax_fit_xy.set_ylabel("Group Precision (pixels)")
-
-        ax_fit_xy.set_xlabel("~# of Photons")
-        ax_xy.set_xlabel("~# of Photons")
-        fig.tight_layout()
-    return fits
 
 
 class PALMData(object):
@@ -551,7 +508,7 @@ class PALMData(object):
         raw_df = peakselector_df(path_to_sav, verbose=verbose)
         # the dummy attribute won't stick around after casting, so pull it now.
         self.totalrawdata = raw_df.totalrawdata
-         # don't discard label column if it's being used
+        # don't discard label column if it's being used
         int_cols = ['frame']
         if raw_df["Label Set"].unique().size > 1:
             d = {"Label Set": "label"}
@@ -570,8 +527,6 @@ class PALMData(object):
             self.grouped[int_cols] = self.grouped[int_cols].astype(int)
         # ccollect garbage
         gc.collect()
-
-
 
     def filter_peaks(self, offset=1000, sigma_max=3, nphotons=0, groupsize=5000):
         """Filter internal dataframes"""
@@ -602,7 +557,7 @@ class PALMData(object):
         else:
             raise TypeError("Data type {} is of unknown type".format(data_type))
         return df[['offset', 'amp', 'xpos', 'ypos', 'nphotons',
-            'sigmax', 'sigmay', 'zpos']].hist(bins=128, figsize=(12, 12), log=True)
+                   'sigmax', 'sigmay', 'zpos']].hist(bins=128, figsize=(12, 12), log=True)
 
     def filter_z(self, min_z=None, max_z=None, **kwargs):
         """Crop the z range of data"""
@@ -653,7 +608,7 @@ class PALMData(object):
     @cached_property
     def raw_counts(self):
         """Number of localizations per frame, not filtering"""
-        return self.raw_frame[["x0"]].count()
+        return self.raw_frame.size()
 
     @cached_property
     def filtered_counts(self):
@@ -662,8 +617,8 @@ class PALMData(object):
 
     def sigmas(self, filt="_filtered", frame=0):
         """Plot sigmas"""
-        fig, axs = plt.subplots(2, 3, figsize=(3*4, 2*4), sharex="col")
-        
+        fig, axs = plt.subplots(2, 3, figsize=(3 * 4, 2 * 4), sharex="col")
+
         for sub_axs, dtype in zip(axs, ("processed", "grouped")):
             df = self.__dict__[dtype + filt]
             df = df[df.frame > frame]
@@ -675,12 +630,12 @@ class PALMData(object):
                 add_line(ax, dat, np.median, color=ax.lines[-1].get_color(), linestyle="--")
                 ax.legend(loc="best", frameon=True)
                 ax.set_yticks([])
-        
+
         for ax in sub_axs:
             ax.set_xlabel("Precision (nm)")
-        
+
         fig.tight_layout()
-        
+
         return fig, axs
 
     def photons(self, filt="_filtered", frame=0):
@@ -716,7 +671,7 @@ class Data405(object):
         calibrated = True
     except FileNotFoundError:
         warnings.warn("Calibration not available ...")
-        
+
         def calibrate(self, array):
             """Do nothing with input"""
             return array
@@ -740,7 +695,7 @@ class Data405(object):
         self.popt, self.pcov = curve_fit(exponent, *data_df_crop[["date_delta", "reactivation"]].values.T)
         data_df["fit"] = exponent(data_df["date_delta"], *self.popt)
         self.fit_win = data_df_crop.date_delta.min(), data_df_crop.date_delta.max()
-        
+
     def plot(self, ax=None, limits=True, lower_limit=0.45, upper_limit=None):
         if ax is None:
             fig, ax = plt.subplots()
@@ -772,7 +727,6 @@ class Data405(object):
         ax.legend()
 
 
-### Fit Functions
 def weird(xdata, *args):
     """Honestly this looks like saturation behaviour"""
     res = np.zeros_like(xdata)
@@ -806,15 +760,15 @@ class PALMExperiment(object):
                  timestep=0.0525, chunksize=250, **kwargs):
         """To initialize the experiment we need to know where the raw data is
         and where the peakselector processed data is
-        
+
         Assumes paths_to_raw are properly sorted"""
-        
+
         # deal with raw data
         try:
             self.raw = RawImages(raw_or_paths_to_raw)
         except TypeError:
             self.raw = raw_or_paths_to_raw
-            
+
         # load peakselector data
         try:
             self.palm = PALMData(path_to_sav, verbose=verbose)
@@ -829,8 +783,8 @@ class PALMExperiment(object):
         except ValueError:
             self.activation = path_to_405
 
-        self.feedbackframes = chunksize * len(self.activation.data)
-        self.nofeedbackframes = self.palm.processed.frame.max() - self.feedbackframes
+        # time at which activation starts
+        self.activation_start = activation.index.min()
 
         if init:
             self.palm.filter_peaks_and_beads(yx_shape=self.raw.shape[-2:])
@@ -849,8 +803,7 @@ class PALMExperiment(object):
     @cached_property
     def masked_mean(self):
         """The masked mean minus the masked background"""
-        return pd.Series(self.raw.masked_mean - self.raw.raw_bg(masked=True),
-                         np.arange(len(self.raw.masked_mean)) * self.timestep, name="Raw Intensity")
+        return self.raw.masked_mean - self.raw.raw_bg(masked=True)
 
     @property
     def nphotons(self):
@@ -871,12 +824,12 @@ class PALMExperiment(object):
     @property
     def nofeedback(self):
         """The portion of the intensity decay that doesn't have feedback"""
-        return self.masked_mean.iloc[:self.nofeedbackframes]
+        return self.masked_mean.loc[:self.activation_start]
 
     @property
     def feedback(self):
         """the portion of the intensity decay that does have feedback"""
-        return self.masked_mean.iloc[self.nofeedbackframes:]
+        return self.masked_mean.loc[self.activation_start:]
 
     def plot_w_fit(self, title, ax=None, func=weird, p0=None):
         if ax is None:
@@ -893,14 +846,14 @@ class PALMExperiment(object):
         # do the fit
         popt, pcov = curve_fit(func, self.nofeedback.index, self.nofeedback, p0=p0)
         fit = func(self.nofeedback.index, *popt)
-        
+
         # plot the fit
         ax.plot(self.nofeedback.index, fit,
                 label=func_label.format(*popt))
 
         # save the residuals in case we want them later
         self.resid = self.nofeedback - fit
-        
+
         ax.legend(frameon=True, loc="lower center")
         ax.set_ylabel("Mean Intensity")
         ax.set_xlabel("Time (s)")
@@ -910,14 +863,19 @@ class PALMExperiment(object):
     def plot_all(self, **kwargs):
         """Plot many statistics for a PALM photophysics expt"""
         # normalize index
-        raw_counts = self.palm.raw_counts.loc[self.nofeedbackframes:]
+        raw_counts = self.palm.raw_counts
+        # copy over timedate index
+        raw_counts.index = self.raw.mean.index
+        raw_counts.loc[self.activation_start:]
+
         # number of photons per frame
         nphotons = self.palm.filtered_frame.nphotons.mean()
+        nphotons.index = self.raw.mean.index
+
         # contrast after feedback is enabled
         # shouldn't contrast be average nphotons normalized by background or something?
-        contrast = (nphotons.loc[self.nofeedbackframes:] / self.nphotons.max())
-        raw_counts.index = raw_counts.index * self.timestep
-        contrast.index = contrast.index * self.timestep
+        contrast = (nphotons.loc[self.activation_start:] / self.nphotons.max())
+
         # make the figure
         fig, axs = plt.subplots(4, figsize=(6, 12))
         (ax0, ax1, ax2, ax3) = axs
