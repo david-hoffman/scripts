@@ -1064,6 +1064,9 @@ def on_off_times(trace, trim=False):
 
 def on_off_times_fast(df):
     """Measure on and off times for a trace, triming leading and trailing offtimes if requested"""
+    if not len(df):
+        # empty DataFrame
+        return array([], dtype="int64"), array([], dtype="int64")
     # find all frames with more than one event
     trace = np.sort(df.frame.unique())
     # calculate the spacing between events
@@ -1400,3 +1403,275 @@ def prune_blobs(df, radius):
         return df.iloc[[
             i for i in range(len(blobs)) if i not in pruned_blobs
         ]]
+
+
+def check_density(shape, data, mag, thresh_func=thresholding.threshold_triangle, diagnostics=True, pix_size=130, dim=3, zscaling=5):
+    """Check the density of the data and find the 99th percentile density
+
+    Return a function that calculates maximal grouping gap from grouping radius
+
+    Allow 2 and 3 dimensional calculations"""
+
+    # generate the initial histograms of the data
+    if dim == 3:
+        hist3d = save_img_3d(shape, data, None, zspacing=pix_size * zscaling / mag, mag=mag, hist=True)
+        hist2d = montage(hist3d)
+    elif dim == 2:
+        hist2d = gen_img(shape, data, mag=mag, hist=True, cmap=None).astype(int)
+    else:
+        raise RuntimeError("dim of {} not allowe, must be 2 or 3".format(dim))
+
+    # convert hist2d to density (# molecules per pixel or voxel)
+    hist2d = hist2d * (mag ** dim)
+    ny, nx = hist2d.shape
+
+    min_density = 0
+
+    # remove places with low values
+    to_threshold = hist2d[hist2d > min_density]
+    to_threshold = to_threshold[to_threshold < np.percentile(hist2d[hist2d > min_density], 99)]
+
+    thresh = thresh_func(to_threshold)
+    max_thresh = np.percentile(hist2d[hist2d > thresh], 99)
+
+    if diagnostics:
+        fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(8 * ny / nx, 4))
+
+        ax0.matshow(hist2d, norm=PowerNorm(0.5), vmax=np.percentile(to_threshold, 99), cmap="Greys_r")
+        ax1.matshow(hist2d, norm=PowerNorm(0.5), vmin=thresh, vmax=max_thresh, cmap=greys_limit)
+
+        # plot of histogram
+        fig3, (ax0, ax1) = plt.subplots(2)
+        ax0.hist(hist2d.ravel(), bins=np.logspace(1, np.log10(hist2d.max() + 10), 128), log=True, color="k")
+        ax0.set_xscale("log")
+        ax0.axvline(max_thresh, c="r")
+        ax0.axvline(thresh, c="b")
+
+        to_plot = hist2d[hist2d > 1]
+        to_plot = to_plot[to_plot < max_thresh]
+        ax1.hist(to_plot, bins=128, log=True, color="k")
+        fig3.tight_layout()
+
+    frame_range = data.frame.max() - data.frame.min()
+
+    frame_density = max_thresh / frame_range
+
+    if diagnostics:
+        print(frame_density)
+
+    def gap(r):
+        if dim == 3:
+            return 1 / (4 / 3 * r ** 3 * frame_density)
+        return 1 / (r ** 2 * frame_density)
+
+    return gap, frame_density
+
+
+def mortensen(df, a2=1.0):
+    """Calculate the mortensen precision of the emitter
+
+    https://www.nature.com/articles/nmeth.1447 (https://doi.org/10.1038/nmeth.1447)
+
+    a2 is the area of the pixel, as the widths are in pixels this should be 1"""
+    var_n = (df[["width_x", "width_y"]] ** 2).div(df.nphotons, "index")
+    # b^2 in the paper is the background photon count _not_ the background photon count squared ...
+    b2 = df.offset
+    new_var = var_n * (16 / 9 + 8 * np.pi * var_n.mul(b2, "index") / a2)
+    new_std = np.sqrt(new_var)
+    new_std.columns = "mort_x", "mort_y"
+    return pd.concat((df, new_std), axis=1)
+
+
+def bin_by_photons(blob, nphotons):
+    # order by z, so that we group things that are near each other in frames (even if they're in different slabs)
+    # this also, conveniently, makes a copy of the DF
+    blob = blob.sort_values("frame")
+
+    # Calculate the total number of photons and then the bin edges
+    # such that the bins each have n photons in them
+    total_nphotons = blob.nphotons.sum()
+    bins = np.arange(0, total_nphotons, nphotons)
+
+    # break the DF into groups with n photons
+    blob2 = blob.assign(group_id=blob.groupby(pd.cut(blob.nphotons.cumsum(), bins)).grouper.group_info[0])
+    # group and calculate the mortensen precision
+    # we recalc mortensen because the new agg has an average width and sum number of photons
+    blob2 = blob2.drop(["mort_x", "mort_y"], axis=1, errors="ignore")
+    return mortensen(agg_groups(blob2))
+
+
+def scale_func(ydata, scale, bg):
+    """scale xdata to ydata"""
+    return scale * ydata + bg
+
+
+def mort(xdata, scale, bg):
+    """scale xdata to ydata"""
+    return (xdata - bg) / scale
+
+
+def calc_precision(blob, nphotons=None):
+    # set up data structures
+    # experimental precision
+    expt = []
+    # mortensen precision
+    mort = []
+
+    #
+    if nphotons is None:
+        # total number of photons
+        total_photons = blob.nphotons.sum()
+        # at the end we want a single group
+        # nphotons = np.logspace(np.log10(blob.nphotons.median() * 2), np.log10(total_photons / 3), max(3, int(np.sqrt(len(blob)))))
+        nphotons = np.logspace(3.5, 5, 32)
+        logger.debug("nphotons is {}".format(nphotons))
+
+    for n in nphotons:
+        binned_blob = bin_by_photons(blob, n)
+        expt.append(binned_blob[["x0", "y0", "z0"]].std())
+        mort.append(binned_blob[["sigma_x", "sigma_y", "sigma_z", "mort_x", "mort_y"]].mean())
+
+        # expt.append(blob3[["x0", "y0"]].std())
+        # mort.append(blob3[["mort_x", "mort_y"]].mean())
+
+    expt_df = pd.DataFrame(expt, index=nphotons)
+    mort_df = pd.DataFrame(mort, index=nphotons)
+    precision_df = pd.concat((expt_df, mort_df), 1).dropna()
+    return precision_df
+
+
+def nnlr(xdata, ydata):
+    """Non-negative linear regression, a linear fit where both b and m are greater than zero"""
+    lhs = np.stack((xdata, np.ones_like(xdata)), -1)
+    rhs = ydata
+    (m, b), resid = nnls(lhs, rhs)
+    return m, b
+
+
+def fit_precision(precision_df, non_negative=False, diagnostics=False):
+    fits = {}
+    fit_df = []
+    for c in "xyz":
+        types = "mort_", "sigma_"
+        if c == "z":
+            types = types[1:]
+        for t in types:
+            expt_df, calc_df = precision_df[c + "0"], precision_df[t + c]
+
+            if non_negative:
+                # non-negative fitting will tend to dump bad fits
+                # into 0 offset 0 scale, not really what we want.
+                popt = nnlr(calc_df, expt_df)
+            else:
+                popt = np.polyfit(calc_df, expt_df, 1)
+
+            fits[t + c + "_scale"] = popt[0]
+            fits[t + c + "_offset"] = popt[1]
+            fit_df.append(scale_func(calc_df, *popt))
+
+    if diagnostics:
+        fit_df = pd.concat(fit_df, axis=1)
+        fig, ((ax_z, ax_fit_z), (ax_xy, ax_fit_xy)) = plt.subplots(2, 2, sharex=True, sharey="row", figsize=(9, 9))
+
+        # turn into nm
+        precision_df = precision_df * 130
+        precision_df[["z0", "sigma_z"]] /= 130
+        fit_df = fit_df * 130
+        fit_df[["sigma_z"]] /= 130
+
+        precision_df[["z0", "sigma_z"]].plot(ax=ax_z, style=":o")
+
+        precision_df[["z0"]].plot(ax=ax_fit_z, style=":o")
+        fit_df[["sigma_z"]].plot(ax=ax_fit_z, style=":o")
+
+        precision_df[["x0", "y0"]].plot(ax=ax_xy, style=":o")
+        precision_df[["mort_x", "mort_y"]].plot(ax=ax_xy, style=":o")
+        precision_df[["sigma_x", "sigma_y"]].plot(ax=ax_xy, style=":o")
+
+        precision_df[["x0", "y0"]].plot(ax=ax_fit_xy, style=":o")
+        fit_df[["mort_x", "mort_y", "sigma_x", "sigma_y"]].plot(ax=ax_fit_xy, style=":o")
+
+        ax_z.set_title("Data")
+        ax_fit_z.set_title("Fits")
+
+        ax_z.set_ylabel("Group Precision (nm)")
+        ax_fit_xy.set_ylabel("Group Precision (pixels)")
+
+        ax_fit_xy.set_xlabel("~# of Photons")
+        ax_xy.set_xlabel("~# of Photons")
+        ax_xy.set_ylabel("Group Precision (nm)")
+
+        fig.tight_layout()
+    return fits
+
+
+def fix_title(t):
+    try:
+        kind, c, measure = t.split("_")
+    except ValueError:
+        return t.capitalize()
+    if kind == "mort":
+        kind = "Mortensen"
+    else:
+        kind = "Calculated"
+
+    measure = measure.capitalize()
+    return r"{} $\sigma_{}$ {}".format(kind, c, measure)
+
+
+def plot_fit_df(fits_df, minscale=5e-1, minoffset=-1e-3):
+    """"""
+    # columns
+    scale_col = ["mort_x_scale", "sigma_x_scale", "mort_y_scale", "sigma_y_scale"]
+    scale_col_z = ["sigma_z_scale"]
+    offset_col = ["mort_x_offset", "sigma_x_offset", "mort_y_offset", "sigma_y_offset"]
+    offset_col_z = ["sigma_z_offset"]
+    other_col = fits_df.columns.difference(scale_col + scale_col_z + offset_col + offset_col_z).tolist()
+
+    # set up plot
+    fig, axs = plt.subplots(4, 4, sharex="row", sharey="row", figsize=(16, 16))
+
+    # filter data frame
+    filt_fits_df = fits_df[(fits_df[scale_col + scale_col_z] > minscale).all(1)]
+    filt_fits_df = filt_fits_df[(filt_fits_df[offset_col + offset_col_z] > minoffset).all(1)]
+
+    # scale xy offsets to nm
+    filt_fits_df[offset_col] *= 130
+
+    # make hists
+    filt_fits_df[scale_col].hist(bins=np.linspace(0, 3, 32), density=True, ax=axs[0])
+    filt_fits_df[offset_col].hist(bins=np.linspace(0, 35, 32), density=True, ax=axs[1])
+
+    filt_fits_df[scale_col_z].hist(bins=np.linspace(0, 3, 32), density=True, ax=axs[2, 0])
+    filt_fits_df[offset_col_z].hist(bins=np.linspace(0, 350, 32), density=True, ax=axs[3, 0])
+
+    # clean up titles
+    for ax in axs.ravel():
+        ax.set_title(fix_title(ax.get_title()))
+
+    # clean up grid
+    dplt.clean_grid(fig, axs)
+    fig.tight_layout()
+
+    # add tables of summary statistics
+    tab_ax0 = fig.add_axes((0.25, 0.25, 0.75, 0.25))
+    tab_ax1 = fig.add_axes((0.25, 0, 0.75, 0.25))
+
+    for tab_ax, col in zip((tab_ax0, tab_ax1), (scale_col + scale_col_z, offset_col + offset_col_z + other_col)):
+        tab_ax.axis("off")
+        dcsummary = filt_fits_df.describe().round(3)[col]
+        tab = tab_ax.table(cellText=dcsummary.values, colWidths=[0.15] * len(dcsummary.columns),
+                           rowLabels=dcsummary.index,
+                           colLabels=[fix_title(c) for c in dcsummary.columns],
+                           cellLoc='center', rowLoc='center',
+                           loc='center')
+        tab.scale(0.9, 2)
+        tab.set_fontsize(16)
+
+    axs_scatter = pd.plotting.scatter_matrix(filt_fits_df[fits_df.columns.difference(other_col)], figsize=(20, 20))
+
+    for ax in axs_scatter.ravel():
+        ax.set_ylabel(fix_title(ax.get_ylabel()))
+        ax.set_xlabel(fix_title(ax.get_xlabel()))
+
+    return (fig, axs), (ax.get_figure(), axs_scatter)
