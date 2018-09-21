@@ -15,6 +15,8 @@ from matplotlib.colors import PowerNorm, ListedColormap
 # data loading
 from scipy.io import readsav
 from skimage.external import tifffile as tif
+from skimage.filters import thresholding
+from skimage.draw import circle
 
 # get multiprocessing support
 import dask
@@ -49,7 +51,8 @@ from peaks.lm import curve_fit
 from scipy.optimize import nnls
 
 from sklearn.cluster import AffinityPropagation
-from skimage.filters import thresholding
+from sklearn.preprocessing import StandardScaler
+from hdbscan import HDBSCAN
 
 from copy import copy
 
@@ -223,23 +226,43 @@ def _get_tif_info(path):
         warnings.simplefilter("ignore")
         with tif.TiffFile(path) as mytif:
             s = mytif.series[0]
-    return dict(shape=s.shape, dtype=s.dtype)
+    return dict(shape=s.shape, dtype=s.dtype.name)
 
 
-def get_labview_metadata(txtfile):
+def _get_tif_info_all(paths, read_all=False):
+    """Get the tifffile shape with the least amount of work
+
+    Assumes all data is of same shape and type."""
+    if read_all:
+        # reading all the paths is super slow, speed it up with threaded reads
+        # seems fair to assume that bottleneck is IO so threads should be fine.
+        tif_info = dask.delayed([dask.delayed(_get_tif_info)(path) for path in paths]).compute()
+    else:
+        # read first image for shape
+        tif_info = _get_tif_info(paths[0])
+        # extend to be same shape as data
+        tif_info = [tif_info] * len(paths)
+
+    return tif_info
+
+
+def _get_labview_metadata(txtfile):
     """Get metadata from labview generated text files as dictionary
 
     Currently only gets date"""
 
     rx_dict = {
         "date": re.compile(r"(?<=Date :\t).+"),
-        "num_imgs": re.compile(r"(?<=# of Imgs :\t)\d+")
+        "num_imgs": re.compile(r"(?<=# of Imgs :\t)\d+"),
+        "time_delta": re.compile(r"(?<=Cycle\(s\) :\t)\d+\.\d+")
     }
 
     process_dict = {
-        "date": lambda x: datetime.datetime.strptime(x, '%m/%d/%Y %I:%M:%S %p'),
-        "num_imgs": int
+        "date": lambda x: np.datetime64(datetime.datetime.strptime(x, '%m/%d/%Y %I:%M:%S %p')),
+        "num_imgs": int,
+        "time_delta": lambda x: np.timedelta64(int(1e6 * float(x)), "us")
     }
+
     with open(txtfile, "r") as f:
         # load all text
         # not efficient but expedient
@@ -250,34 +273,43 @@ def get_labview_metadata(txtfile):
     return {k: process_dict[k](v.group()) for k, v in match_dict.items()}
 
 
-def make_lazy_data(paths, read_all_shapes=False):
+def make_lazy_data(paths, tif_info):
     """Make a lazy data array from a set of paths to data
 
     Assumes all data is of same shape and type."""
-    if read_all_shapes:
-        # reading all the paths is super slow, speed it up with threaded reads
-        # seems fair to assume that bottleneck is IO so threads should be fine.
-        tif_info = dask.delayed([dask.delayed(_get_tif_info)(path) for path in paths]).compute(scheduler="processes")
-        data = [dask.array.from_delayed(lazy_imread(path), **info) for info, path in zip(tif_info, paths)]
-        data_array = dask.array.concatenate(data)
-    else:
-        # read first image for shape
-        tif_info = _get_tif_info(paths[0])
-        data = [dask.array.from_delayed(lazy_imread(path), **tif_info) for path in paths]
-        data_array = dask.array.concatenate(data)
-        # extend to be same shape as data
-        tif_info = [tif_info] * len(paths)
-    return data_array, tif_info
+    data = [dask.array.from_delayed(lazy_imread(path), **info) for info, path in zip(tif_info, paths)]
+    data_array = dask.array.concatenate(data)
+    return data_array
 
 
 class RawImages(object):
     """A container for lazy raw images"""
 
-    def __init__(self, paths_to_raw, read_all_shapes=False):
-        if isinstance(paths_to_raw, dask.array.core.Array):
-            self.raw = paths_to_raw
-        else:
-            self.raw, tif_meta = make_lazy_data(paths_to_raw, read_all_shapes=read_all_shapes)
+    def __init__(self, raw, metadata, paths):
+        """Initialize a raw images object, most users will do this through the `create` and `load` methods"""
+        self.raw = raw
+        self.metadata = metadata
+        self.paths = paths
+
+        # generate time stamps for each image
+        times = [
+            np.arange(meta["shape"][0]) * meta["time_delta"] + meta["date"]
+            for meta in metadata
+        ]
+
+        # generate an index
+        self.date_idx = pd.DatetimeIndex(
+            data=np.concatenate(times),
+            name="Timestamp"
+        )
+
+        assert len(self.date_idx) == len(self.raw), "Date index and Raw data don't match, {}, {}".format(self.date_idx, self.raw)
+
+    @classmethod
+    def create(cls, paths_to_raw, read_all=False):
+        """Create a RawImages object from paths to tif files"""
+        tif_info = _get_tif_info_all(paths_to_raw, read_all=read_all)
+        raw = make_lazy_data(paths_to_raw, tif_info)
 
         # get date times
         def switch_to_txt(path):
@@ -288,75 +320,51 @@ class RawImages(object):
             return os.path.join(dname, prefix + "_Settings.txt")
 
         metadata_paths = map(switch_to_txt, paths_to_raw)
-        metadata = map(lambda x: get_labview_metadata(x), metadata_paths)
+        metadata = map(lambda x: _get_labview_metadata(x), metadata_paths)
 
         # update meta data with tif data
-        assert len(tif_meta) == len(paths_to_raw), "Paths and meta data don't match"
-        metadata = [{**x, **y} for x, y in zip(metadata, tif_meta)]
+        assert len(tif_info) == len(paths_to_raw), "Paths and meta data don't match"
+        metadata = [{**x, **y} for x, y in zip(metadata, tif_info)]
 
-        # get the frame numbers
-        frame_num = np.array([m["shape"][0] for m in metadata])
-        frame_num = frame_num.cumsum() - frame_num[0]
-        # now we can set up our datetimes
-        date_series = pd.Series(
-            # data is the date
-            data=[m["date"] for m in metadata],
-            # index is the first frame
-            index=pd.Int64Index(frame_num, name="frame"),
-            name="Timestamp"
+        return cls(raw, metadata, paths_to_raw)
+
+    @classmethod
+    def load(cls, fname):
+        """Load everything from a pandas managed hdf5 container"""
+        metadata = pd.read_hdf(fname, "metadata").to_dict("records")
+        for m in metadata:
+            m["date"] = np.datetime64(m["date"])
+        paths = pd.read_hdf(fname, "paths").tolist()
+        # reform tif_info list
+        tif_info = [dict(shape=m["shape"], dtype=m["dtype"]) for m in metadata]
+        # make dask.Array
+        raw = make_lazy_data(paths, tif_info)
+        # pass to initilizer
+        return cls(raw, metadata, paths)
+
+    def save(self, fname):
+        """Dump everything into a pandas managed HDF5 container"""
+        save_dict = dict(
+            metadata=pd.DataFrame(self.metadata),
+            paths=pd.Series(self.paths)
         )
+        for k, v in save_dict.items():
+            v.to_hdf(fname, k)
 
-        # expand to full index
-        date_series = date_series.reindex(pd.RangeIndex(len(self.raw)))
-        # convert dates to ints and then floats (need float for NaN)
-        date_series2 = date_series.astype('i8').astype('f8')
-        # replace bad values with NaN
-        date_series2[date_series.isnull()] = np.nan
-        # interpolate and convert back to datetime
-        self.date_series = pd.to_datetime(date_series2.interpolate("slinear", fill_value="extrapolate"))
+    @property
+    def shapes(self):
+        """shapes of the underlying data files"""
+        return np.array([m["shape"] for m in self.metadata])
+
+    @property
+    def lengths(self):
+        """shapes of the underlying data files"""
+        return self.shapes[:, 0]
 
     def __len__(self):
         return len(self.raw)
 
-    def make_fiducial_mask(self, frames=slice(-100, None), iters=2,
-                           diagnostics=False, dilation_kwargs=None, **kwargs):
-        """Make a mask for the fiducials"""
-        if dilation_kwargs is None:
-            dilation_kwargs = dict(iterations=5)
-        # get the median last frames
-        # last_frames = last_frames_temp = np.median(self.raw[frames], 0)
-        # last_frames = last_frames_temp = self.mean_img
-        init_mask = self.mean_img > thresholding.threshold_triangle(self.mean_img)
-        # for i in range(iters):
-        #     init_mask = last_frames_temp > threshold_triangle(last_frames_temp)
-        #     last_frames_temp[~init_mask] = mode(last_frames_temp.astype(int))
-
-        # the beads/fiducials are high, so we want to negate here
-        mask = ~ndi.binary_dilation(init_mask, **dilation_kwargs)
-
-        if diagnostics:
-            plot_kwargs = dict(norm=PowerNorm(0.25), vmax=1000, vmin=100, cmap="inferno")
-            if isinstance(diagnostics, dict):
-                plot_kwargs.update(diagnostics)
-            fig, (ax0, ax1) = plt.subplots(2, figsize=(4, 8))
-            ax0.matshow(self.mean_img, **plot_kwargs)
-            ax1.matshow(mask * self.mean_img, **plot_kwargs)
-            ax0.set_title("Unmasked")
-            ax1.set_title("Masked")
-            for ax in (ax0, ax1):
-                ax.grid(False)
-                ax.axis(False)
-
-        # we just made the mask so we should recompute the masked_mean if requested again
-        try:
-            del self.masked_mean
-        except AttributeError:
-            # masked_mean doesn't exist yet so don't worry
-            pass
-
-        self.mask = mask
-
-    @cached_property
+    @property
     def shape(self):
         return self.raw.shape
 
@@ -364,39 +372,16 @@ class RawImages(object):
     def mean(self):
         """return the mean of lazy_data"""
         mymean = self.raw.mean((1, 2)).compute()
-        return pd.Series(data=mymean, index=self.date_series, name="raw_mean")
+        return pd.Series(data=mymean, index=self.date_idx, name="raw_mean")
 
     @cached_property
     def mean_img(self):
         """return the mean of lazy_data"""
         return self.raw.mean(0).compute()
 
-    @cached_property
-    def masked_mean(self):
-        """return the masked mean"""
-        raw_reshape = self.raw.reshape(self.raw.shape[0], -1)
-        raw_masked = raw_reshape[:, self.mask.ravel()]
-        raw_masked = raw_masked.mean(1).compute()
-        return pd.Series(data=raw_masked, index=self.date_series, name="masked_mean")
-
     @property
-    def raw_sum(self):
+    def sum(self):
         return self.mean * np.prod(self.raw.shape[1:])
-
-    @memoize
-    def raw_bg(self, num_frames=100, masked=False):
-        """Take the median of the last num_frames and compute the mean of the
-        median frame to estimate the background and bead contributions"""
-        if masked:
-            try:
-                s = self.mask
-            except AttributeError:
-                self.make_fiducial_mask()
-                s = self.mask
-        else:
-            s = slice(None)
-        self.median_frames = np.median(self.raw[-num_frames:], 0)
-        return self.median_frames[s].mean()
 
 
 def max_z(palm_df, nbins=128):
@@ -447,7 +432,18 @@ class PALMData(object):
     """A simple class to manipulate peakselector data"""
     # columns we want to keep
 
-    def __init__(self, path_to_sav, verbose=False, processed_only=False, include_width=False):
+    save_list = "processed", "drift", "drift_corrected", "grouped"
+
+    def __init__(self, shape, *, processed=None, drift=None, drift_corrected=None, grouped=None):
+        """"""
+        self.shape = shape
+        self.processed = processed
+        self.drift = drift
+        self.drift_corrected = drift_corrected
+        self.grouped = grouped
+
+    @classmethod
+    def load_sav(cls, path_to_sav, verbose=False, processed_only=False, include_width=False):
         """To initialize the experiment we need to know where the raw data is
         and where the peakselector processed data is
 
@@ -467,7 +463,7 @@ class PALMData(object):
 
         # add gaussian widths
 
-        self.peak_col = {
+        peak_col = {
             'X Position': "x0",
             'Y Position': "y0",
             '6 N Photons': "nphotons",
@@ -482,14 +478,14 @@ class PALMData(object):
         }
 
         if include_width:
-            self.peak_col.update(
-                    {
-                        'X Peak Width': "width_x",
-                        'Y Peak Width': "width_y",
-                    }
-                )
+            peak_col.update(
+                {
+                    'X Peak Width': "width_x",
+                    'Y Peak Width': "width_y",
+                }
+            )
 
-        self.group_col = {
+        group_col = {
             'Frame Number': 'frame',
             'Group X Position': 'x0',
             'Group Y Position': 'y0',
@@ -507,154 +503,105 @@ class PALMData(object):
         # load peakselector data
         raw_df = peakselector_df(path_to_sav, verbose=verbose)
         # the dummy attribute won't stick around after casting, so pull it now.
-        self.totalrawdata = raw_df.totalrawdata
+        totalrawdata = raw_df.totalrawdata
         # don't discard label column if it's being used
         int_cols = ['frame']
         if raw_df["Label Set"].unique().size > 1:
             d = {"Label Set": "label"}
             int_cols += ['label']
-            self.peak_col.update(d)
-            self.group_col.update(d)
+            peak_col.update(d)
+            group_col.update(d)
         # convert to float
-        self.processed = raw_df[list(self.peak_col.keys())].astype(float)
+        processed = raw_df[list(peak_col.keys())].astype(float)
         # normalize column names
-        self.processed = self.processed.rename(columns=self.peak_col)
-        self.processed[int_cols] = self.processed[int_cols].astype(int)
+        processed = processed.rename(columns=peak_col)
+        processed[int_cols] = processed[int_cols].astype(int)
+
         if not processed_only:
             int_cols += ['groupsize']
-            self.grouped = grouped_peaks(raw_df)[list(self.group_col.keys())].astype(float)
-            self.grouped = self.grouped.rename(columns=self.group_col)
-            self.grouped[int_cols] = self.grouped[int_cols].astype(int)
-        # ccollect garbage
+            grouped = grouped_peaks(raw_df)[list(group_col.keys())].astype(float)
+            grouped = grouped.rename(columns=group_col)
+            grouped[int_cols] = grouped[int_cols].astype(int)
+        else:
+            grouped = None
+
+        # collect garbage
         gc.collect()
 
-    def filter_peaks(self, offset=1000, sigma_max=3, nphotons=0, groupsize=5000):
-        """Filter internal dataframes"""
-        for df_title in ("processed", "grouped"):
-            df = self.__dict__[df_title]
-            filter_series = (
-                (df.offset > 0) & # we know that offset should be around this value.
-                (df.offset < offset) &
-                (df.sigma_x < sigma_max) &
-                (df.sigma_y < sigma_max) &
-                (df.nphotons > nphotons)
-            )
-            if "groupsize" in df.keys():
-                filter_series &= df.groupsize < groupsize
-            self.__dict__[df_title + "_filtered"] = df[filter_series]
+        return cls(totalrawdata.shape, processed=processed, grouped=grouped)
 
-    def hist(self, data_type="grouped", filtered=False):
-        if data_type == "grouped":
-            if filtered:
-                df = self.grouped_filtered
-            else:
-                df = self.grouped
-        elif data_type == "processed":
-            if filtered:
-                df = self.processed_filtered
-            else:
-                df = self.processed
-        else:
-            raise TypeError("Data type {} is of unknown type".format(data_type))
-        return df[['offset', 'amp', 'xpos', 'ypos', 'nphotons',
-                   'sigmax', 'sigmay', 'zpos']].hist(bins=128, figsize=(12, 12), log=True)
+    def drift_correct(self, sz=25, **kwargs):
+        _, self.drift, _, self.drift_fiducials = remove_all_drift(
+            self.processed[self.processed.sigma_z < sz],
+            self.shape, None, None,
+            **kwargs
+        )
+        self.drift_corrected = remove_drift(self.processed, self.drift)
+        calc_fiducial_stats(self.drift_fiducials, diagnostics=True)
 
-    def filter_z(self, min_z=None, max_z=None, **kwargs):
-        """Crop the z range of data"""
-        if len(self.grouped):
-            df = self.grouped
-        else:
-            df = self.processed
-        try:
-            auto_min_z, auto_max_z = auto_z(df, **kwargs)
-        except ValueError:
-            warnings.warn("`auto_z` has failed, no clipping of z will be done.")
-            auto_min_z, auto_max_z = -np.inf, np.inf
-        if min_z is None:
-            min_z = auto_min_z
-        if max_z is None:
-            max_z = auto_max_z
-        for df_title in ("processed", "grouped"):
-            sub_title = "_filtered"
-            df = self.__dict__[df_title + sub_title]
-            filt = (df.z0 < max_z) & (df.z0 > min_z)
-            self.__dict__[df_title + sub_title] = df[filt]
-
-    def filter_peaks_and_beads(self, peak_kwargs, fiducial_kwargs, filter_z_kwargs):
-        """Filter individual localizations and remove fiducials"""
-        print("Starting filtering peaks")
-        self.filter_peaks(**peak_kwargs)
-        print("Removing fiducials")
-        self.remove_fiducials(**fiducial_kwargs)
-        print("Filtering z")
-        self.filter_z(**filter_z_kwargs)
-
-    def remove_fiducials(self, yx_shape, subsampling=1, exclusion_radius=1, **kwargs):
-        # use processed to find fiducials.
-        for df_title in ("processed_filtered", "grouped_filtered"):
-            self.__dict__[df_title] = remove_fiducials(self.processed, yx_shape, self.__dict__[df_title],
-                                  exclusion_radius=exclusion_radius, **kwargs)
+    def group(self, r, zscaling=10):
+        """group the drift corrected data"""
+        gap, thresh = check_density(self.shape, self.drift_corrected, 1, dim=3, zscaling=zscaling)
+        mygap = int(gap(r))
+        logger.info("Grouping gap is being set to {}".format(mygap))
+        self.grouped = slab_grouper([self.drift_corrected], radius=r, gap=mygap, zscaling=zscaling * 130, numthreads=48)[0]
 
     @cached_property
-    def raw_frame(self):
-        """Make a groupby object that is by frame"""
-        return self.processed.groupby("frame")
+    def fiducials(self):
+        return find_fiducials(self.drift_corrected, self.shape, diagnostics=True)
+
+    def remove_fiducials(self, radius):
+        """remove fiducials from data"""
+        for df_title in ("drift_corrected", "grouped"):
+            try:
+                df = getattr(self, df_title)
+            except AttributeError:
+                continue
+            df_nf = filter_fiducials(df, self.fiducials, radius)
+            setattr(self, df_title + "_nf", df_nf)
+
+    @classmethod
+    def load(cls, fname):
+        """Load PALMData object from Pandas managed HDF container"""
+        shape = tuple(pd.read_hdf(fname, "shape"))
+        kwargs = {}
+        for obj in cls.save_list:
+            try:
+                kwargs[obj] = pd.read_hdf(fname, obj)
+            except KeyError:
+                logger.info("Failed to find {} in {}".format(obj, fname))
+                continue
+        return cls(shape, **kwargs)
+
+    def save(self, fname):
+        """Save object internals into Pandas managed HDF container"""
+        pd.Series(self.shape).to_hdf(fname, "shape")
+        for obj in self.save_list:
+            try:
+                getattr(self, obj).to_hdf(fname, obj)
+            except AttributeError:
+                logger.info("Failed to find {}".format(obj))
+                continue
 
     @cached_property
-    def filtered_frame(self):
-        """Make a groupby object that is by frame"""
-        return self.processed_filtered.groupby("frame")
+    def data_mask(self):
+        """A mask of the data, i.e. areas that are high density but not fiducials
 
-    @cached_property
-    def raw_counts(self):
-        """Number of localizations per frame, not filtering"""
-        return self.raw_frame.size()
+        Note that this returns True where the data is and False were it isn't, which
+        is the opposite of that required for np.ma.masked_array"""
+        cimg = gen_img(self.shape, self.grouped_nf, mag=1, hist=True, cmap=None)
+        thresh = thresholding.threshold_triangle(cimg)
+        return cimg > thresh
 
-    @cached_property
-    def filtered_counts(self):
-        """Number of localizations per frame, not filtering"""
-        return self.filtered_frame[["x0"]].count()
+    def make_fiducial_mask(self, radius):
+        """A mask at fiducial locations
 
-    def sigmas(self, filt="_filtered", frame=0):
-        """Plot sigmas"""
-        fig, axs = plt.subplots(2, 3, figsize=(3 * 4, 2 * 4), sharex="col")
-
-        for sub_axs, dtype in zip(axs, ("processed", "grouped")):
-            df = self.__dict__[dtype + filt]
-            df = df[df.frame > frame]
-            for ax, attr, mult in zip(sub_axs, ("sigma_x", "sigma_y", "sigma_z"), (130, 130, 1)):
-                dat = (df[attr] * mult)
-                dat.hist(ax=ax, bins="auto", density=True)
-                ax.set_title("{} $\{}$".format(dtype.capitalize(), attr))
-                add_line(ax, dat)
-                add_line(ax, dat, np.median, color=ax.lines[-1].get_color(), linestyle="--")
-                ax.legend(loc="best", frameon=True)
-                ax.set_yticks([])
-
-        for ax in sub_axs:
-            ax.set_xlabel("Precision (nm)")
-
-        fig.tight_layout()
-
-        return fig, axs
-
-    def photons(self, filt="_filtered", frame=0):
-        fig, axs = plt.subplots(2, sharex=True, figsize=(4, 8))
-        for ax, dtype in zip(axs, ("processed", "grouped")):
-            df = self.__dict__[dtype + filt]
-            series = df[df.frame > frame]["nphotons"]
-            bins = np.logspace(np.log10(series.min()), np.log10(series.max()), 128)
-            series.hist(ax=ax, log=True, bins=bins)
-            ax.set_xscale("log")
-            # mean line
-            add_line(ax, series)
-            # median line
-            add_line(ax, series, np.median, color=ax.lines[-1].get_color(), linestyle="--")
-            ax.legend(frameon=True, loc="best")
-            ax.set_title(dtype.capitalize())
-        ax.set_xlabel("# of Photons")
-        fig.tight_layout
-        return fig, axs
+        Note that this returns True for where the fiducials are and False
+        For where they aren't"""
+        mask = np.zeros(self.shape)
+        for y, x in self.fiducials:
+            mask[circle(y, x, radius, shape=self.shape)] = 1
+        self.fiducial_mask = mask.astype(bool)
 
 
 def exponent(xdata, amp, rate, offset):
@@ -679,12 +626,23 @@ class Data405(object):
 
     def __init__(self, path):
         """Read in data, normalize column names and set the time index"""
+        self.path = path
         self.data = pd.read_csv(path, index_col=0, parse_dates=True)
         self.data = self.data.rename(columns={k: k.split(" ")[0].lower() for k in self.data.keys()})
         # convert voltage to power
         self.data.reactivation = self.calibrate(self.data.reactivation)
         # calculate date delta in hours
         self.data['date_delta'] = (self.data.index - self.data.index.min()) / np.timedelta64(1, 'h')
+
+    def save(self, fname):
+        """"""
+        pd.Series(self.path).to_hdf(fname, "path405")
+
+    @classmethod
+    def load(cls, fname):
+        """"""
+        path = pd.read_hdf(fname, "path405").values[0]
+        return cls(path)
 
     def fit(self, lower_limit, upper_limit=None):
         # we know that the laser is subthreshold below 0.45 V and the max is 5 V, so we want to limit the data between these two
@@ -703,10 +661,13 @@ class Data405(object):
         if (self.data["reactivation"] > lower_limit).sum() > 100:
             # this is fast so no cost
             self.fit(lower_limit, upper_limit)
-            self.data.plot(x="date_delta", y=["reactivation", "fit"], ax=ax)
-            equation = "$y(t) = {:.3f} e^{{{:.3f}t}} + {:.3f}$".format(*self.popt)
+
+            equation = "$y(t) = {:.3f} e^{{{:.3f}t}} {:+.3f}$".format(*self.popt)
             tau = r"$\tau = {:.2f}$ hours".format(1 / self.popt[1])
-            ax.text(0.1, 0.5, "\n".join([equation, tau]), transform=ax.transAxes)
+            eqn_txt = "\n".join([equation, tau])
+
+            self.data.plot(x="date_delta", y=["reactivation", "fit"], ax=ax, label=["Data", eqn_txt])
+
             if limits:
                 for i, edge in enumerate(self.fit_win):
                     if i:
@@ -724,14 +685,14 @@ class Data405(object):
         else:
             ax.set_ylabel("405 nm Voltage")
 
-        ax.legend()
+        ax.legend(loc="best")
 
 
 def weird(xdata, *args):
     """Honestly this looks like saturation behaviour"""
     res = np.zeros_like(xdata)
     for a, b, c in zip(*(iter(args),) * 3):
-        res += a*(1 + b * xdata) ** c
+        res += a * (1 + b * xdata) ** c
     return res
 
 
@@ -756,80 +717,119 @@ def multi_exp(xdata, *args):
 class PALMExperiment(object):
     """A simple class to organize our experimental data"""
 
-    def __init__(self, raw_or_paths_to_raw, path_to_sav, path_to_405, verbose=False, init=False,
-                 timestep=0.0525, chunksize=250, **kwargs):
-        """To initialize the experiment we need to know where the raw data is
-        and where the peakselector processed data is
-
-        Assumes paths_to_raw are properly sorted"""
+    def __init__(self, raw, palm, activation):
+        """To initialize the experiment we need raw data, palm data and activation
+        each of these are RawImages, PALMData and Data405 objects respectively"""
 
         # deal with raw data
-        try:
-            self.raw = RawImages(raw_or_paths_to_raw)
-        except TypeError:
-            self.raw = raw_or_paths_to_raw
-
-        # load peakselector data
-        try:
-            self.palm = PALMData(path_to_sav, verbose=verbose)
-        except TypeError:
-            # assume user has passed PALMData object
-            self.palm = path_to_sav
-
-        self.timestep = timestep
-
-        try:
-            self.activation = Data405(path_to_405)
-        except ValueError:
-            self.activation = path_to_405
+        self.raw = raw
+        self.palm = palm
+        self.activation = activation
 
         # time at which activation starts
-        self.activation_start = activation.index.min()
+        self.activation_start = self.activation.data.index.min()
 
-        if init:
-            self.palm.filter_peaks_and_beads(yx_shape=self.raw.shape[-2:])
-            self.masked_mean
+        # new time index with 0 at start of activation
+        self.time_idx = (self.raw.date_idx - self.activation_start) / np.timedelta64(1, 'h')
 
-    def filter_peaks_and_beads(self, peak_kwargs=dict(), fiducial_kwargs=dict(), filter_z_kwargs=dict()):
-        """Filter individual localizations and remove fiducials"""
-        fiducial_kwargs.update(dict(
-            yx_shape=self.raw.shape[-2:],
-            cmap="inferno",
-            vmax=1000,
-            norm=PowerNorm(0.25)
-        ))
-        self.palm.filter_peaks_and_beads(peak_kwargs, fiducial_kwargs, filter_z_kwargs)
+    @classmethod
+    def load(cls, fname):
+        """Load data from a pandas managed HDF5 store"""
+        raw = RawImages.load(fname)
+        palm = PALMData.load(fname)
+        activation = Data405.load(fname)
+        return cls(raw, palm, activation)
 
-    @cached_property
-    def masked_mean(self):
-        """The masked mean minus the masked background"""
-        return self.raw.masked_mean - self.raw.raw_bg(masked=True)
+    def save(self, fname):
+        """Save data to a pandas managed HDF store"""
+        self.raw.save(fname)
+        self.palm.save(fname)
+        self.activation.save(fname)
 
-    @property
-    def nphotons(self):
-        """number of photons per frame calculated from integrated intensity"""
-        return self.masked_mean * (self.raw.shape[-1] * self.raw.shape[-2])
+    def masked_agg(self, masktype, agg_func=np.median):
+        """Mask and aggregate raw data along frame direction with agg_func
 
-    def plot_drift(self, max_s=0.15, max_fid=10):
-        fid_dfs = extract_fiducials(self.palm.processed, find_fiducials(self.palm.processed, self.raw.shape[1:]), 1)
-        fid_stats, all_drift = calc_fiducial_stats(fid_dfs)
-        fid_stats = fid_stats.sort_values("sigma")
-        good_fid = fid_stats[fid_stats.sigma < max_s].iloc[:max_fid]
-        if not len(good_fid):
-            # if no fiducials survive, just use the best one.
-            good_fid = fid_stats.iloc[:1]
+        Save results on RawImages object"""
+        # make sure our agg_func works with masked arrays
+        agg_func = getattr(np.ma, agg_func.__name__)
+        
+        # we have to reverse the mask for how np.ma.masked_array works
+        if masktype.lower() == "data":
+            mask = ~self.palm.data_mask
+        elif masktype.lower() == "fiducials":
+            mask = ~self.palm.fiducial_mask
+        elif masktype.lower() == "background":
+            mask = (self.palm.fiducial_mask | self.palm.data_mask)
+        else:
+            raise ValueError("masktype {} not recognized, needs to be one of 'data', 'fiducials' or 'background'".format(masktype))
+        
+        # figure out how to split the drift to align with raw data
+        cut_points = np.append(0, self.raw.lengths).cumsum()
 
-        return plot_stats([fid_dfs[g] for g in good_fid.index], z_pix_size=1)
+        @dask.delayed
+        def shift_and_mask(chunk, chunked_shifts):
+            """Drift correct raw data (based on PALM drift correction), mask and aggregate"""
+            # calculate chunked mask
+            assert len(chunk) == len(chunked_shifts), "Lengths don't match"
+            
+            # convert image data to float
+            chunk = chunk.astype(float)
+            
+            # drift correct the chunk
+            shifted_chunk = np.array([
+                # we're drift correcting the *data* so negative shifts
+                # fill with nan's so we can mask those off too.
+                ndi.shift(data, (-y, -x), order=1, cval=np.nan)
+                for data, (y, x) in zip(chunk, chunked_shifts)
+            ])
+            
+            # True indicates a masked (i.e. invalid) data.
+            # cut out areas that were shifted out of frame
+            extended_mask = np.array([mask] * len(shifted_chunk)) | ~np.isfinite(shifted_chunk)
+            
+            # mask drift corrected raw data
+            shifted_masked_array = np.ma.masked_array(shifted_chunk, extended_mask)
+            
+            # return aggregated data along frame axis
+            return np.asarray(agg_func(shifted_masked_array, (1, 2)))
 
-    @property
-    def nofeedback(self):
-        """The portion of the intensity decay that doesn't have feedback"""
-        return self.masked_mean.loc[:self.activation_start]
+        # get x, y shifts from palm drift
+        shifts = self.palm.drift[["y0", "x0"]].values
 
-    @property
-    def feedback(self):
-        """the portion of the intensity decay that does have feedback"""
-        return self.masked_mean.loc[self.activation_start:]
+        # set up computation tree
+        to_compute = [
+            shift_and_mask(lazy_imread(path), shifts[cut_points[i]:cut_points[i + 1]])
+            for i, path in enumerate(self.raw.paths)
+        ]
+
+        # get masked results
+        masked_result = np.concatenate(dask.delayed(to_compute).compute(scheduler="processes"))
+        
+        # save these attributes on the RawImages Object
+        attrname = "masked_" + masktype.lower() + "_" + agg_func.__name__
+        logger.info("Setting {}".format(attrname))
+        setattr(self.raw, attrname, masked_result)
+
+        return masked_result
+
+    def agg(self, agg_func=np.median):
+        """Aggregate raw data along frame direction with agg_func"""
+        
+        @dask.delayed
+        def agg_sub(chunk):
+            """Calculate agg"""
+            return np.asarray(agg_func(chunk, (1, 2)))
+
+        to_compute = dask.delayed([agg_sub(lazy_imread(path)) for path in self.raw.paths])
+
+        result = np.concatenate(to_compute.compute(scheduler="processes"))
+        
+        # save these attributes on the RawImages Object
+        attrname = masktype.lower() + "_" + agg_func.__name__
+        logger.info("Setting {}".format(attrname))
+        setattr(self.raw, attrname, result)
+
+        return result
 
     def plot_w_fit(self, title, ax=None, func=weird, p0=None):
         if ax is None:
@@ -860,45 +860,112 @@ class PALMExperiment(object):
         ax.set_title(title)
         return fig, ax
 
-    def plot_all(self, **kwargs):
-        """Plot many statistics for a PALM photophysics expt"""
-        # normalize index
-        raw_counts = self.palm.raw_counts
-        # copy over timedate index
-        raw_counts.index = self.raw.mean.index
-        raw_counts.loc[self.activation_start:]
+    @cached_property
+    def frame(self):
+        """Make a groupby object that is by frame"""
+        return self.palm.drift_corrected_nf.groupby("frame")
 
-        # number of photons per frame
-        nphotons = self.palm.filtered_frame.nphotons.mean()
-        nphotons.index = self.raw.mean.index
+    @cached_property
+    def nphotons(self):
+        """mean number of photons per frame per localization excluding fiducials"""
+        nphotons = self.frame.nphotons.mean().reindex(pd.RangeIndex(len(self.raw)))
+        nphotons.index = self.time_idx
+        return nphotons
 
+    @cached_property
+    def counts(self):
+        """Number of localizations per frame, excluding fiducials"""
+        counts = self.frame.size().reindex(pd.RangeIndex(len(self.raw)))
+        counts.index = self.time_idx
+        return counts
+
+    @cached_property
+    def intensity(self):
+        """Median intensity within masked (data) area, in # of photons"""
+        return pd.Series(data=self.raw.masked_data_median - 100, index=self.time_idx)
+
+    @cached_property
+    def contrast_ratio(self):
+        """Contrast ratio is average number of photons per frame per localization divided
+        by average number of photons in data masked area"""
         # contrast after feedback is enabled
-        # shouldn't contrast be average nphotons normalized by background or something?
-        contrast = (nphotons.loc[self.activation_start:] / self.nphotons.max())
-
+        # denominator is average number of photons per pixel
+        return self.nphotons / self.intensity
+    
+    def plot_feedback(self, **kwargs):
+        """Make plots for time when feedback is on"""
+        
         # make the figure
-        fig, axs = plt.subplots(4, figsize=(6, 12))
-        (ax0, ax1, ax2, ax3) = axs
-        # join the axes together
-        ax0.get_shared_x_axes().join(*axs[:3])
-        for ax, df in zip(axs[:3], (self.feedback, raw_counts, contrast)):
-            df.plot(ax=ax)
-            df.rolling(1000, 0, center=True).mean().plot(ax=ax)
+        fig, axs = plt.subplots(4, figsize=(6, 12), sharex=True)
 
-        self.activation.plot(ax=ax3, limits=False, **kwargs)
+        # end when activation starts
+        self._plot_sub(axs[:3], slice(0, None))
 
-        for ax in axs[:3]:
-            ax.set_xticklabels([])
-            ax.set_xlabel("")
+        # add activation plot
+        self.activation.plot(ax=axs[-1], limits=False, **kwargs)
 
-        ax0.set_ylabel("Average Frame Intensity\n(Background Subtracted)")
-        ax1.set_ylabel("Raw Localizations\nPer Frame (with Fiducials)")
-        ax2.set_ylabel("Contrast Ratio")
-        ax3.set_ylabel("405 Voltage (V)")
-
-        ax0.set_title("Feedback Only")
+        # set figure title
+        axs[0].set_title("Feedback Only")
 
         fig.tight_layout()
+        
+        return fig, axs
+
+    def plot_all(self, **kwargs):
+        """Plot entire experiment"""
+        
+        # make the figure
+        fig, axs = plt.subplots(4, figsize=(6, 12), sharex=True)
+
+        # Plot all data
+        self._plot_sub(axs[:3])
+
+        # add activation plot
+        self.activation.plot(ax=axs[-1], limits=False, **kwargs)
+
+        # add line for t = 0
+        for ax in axs:
+            ax.axvline(0, color="r")
+
+        fig.tight_layout()
+        
+        return fig, axs
+
+    def plot_nofeedback(self):
+        """Plot many statistics for a PALM photophysics expt"""
+        
+        # end at 0 time
+        fig, axs = self._plot_sub(None, s=slice(None, 0))
+
+        axs[0].set_title("No Feedback")
+        axs[-1].set_xlabel("Time (hours)")
+
+        fig.tight_layout()
+        return fig, axs
+
+    def _plot_sub(self, axs=None, s=slice(None, None, None)):
+        """Plot many statistics for a PALM photophysics expt"""
+
+        # make the figure
+        if axs is None:
+            fig, axs = plt.subplots(3, figsize=(6, 9), sharex=True)
+        else:
+            fig = axs[0].get_figure()
+
+        titles = (
+            "Average # of Photons / Pixel",
+            "Raw Localizations\nPer Frame (without Fiducials)",
+            "Contrast Ratio"
+        )
+
+        data = self.intensity, self.counts, self.contrast_ratio
+
+        for ax, df, title in zip(axs, data, titles):
+            df = df.loc[s]
+            df.plot(ax=ax)
+            df.rolling(1000, 0, center=True).mean().plot(ax=ax)
+            ax.set_ylabel(title)
+
         return fig, axs
 
 
@@ -1280,7 +1347,7 @@ def plot_blinks(gap, max_frame, onofftimes=None, samples_blinks=None, ax=None, m
     label = "$\mu_{{data}}={:.2f}$, $p_{{50^{{th}}}}={}$\n".format(blinks.mean(), int(np.median(blinks)))
     label += r"$\alpha={:.2f}$, $\mu_{{\lambda}}={:.2f}$, $\sigma_{{\lambda}}={:.2f}$".format(alpha, mu, mu / np.sqrt(alpha))
     label += "\nGap = {:g}, % Trace = {:.1%}".format(gap, gap / max_frame)
-    
+
     if density:
         ax.set_ylabel("Frequency")
     else:
@@ -1313,7 +1380,7 @@ def prune_blobs(df, radius):
             A 2d array with each row representing 3 values,
             `(y, x, intensity)` where `(y, x)` are coordinates
             of the blob and `intensity` is the intensity of the
-            blob (value at (x, y)).
+            blob (value at (x, y))
         diameter : float
             Allowed spacing between blobs
 
@@ -1392,30 +1459,31 @@ def check_density(shape, data, mag, thresh_func=thresholding.threshold_triangle,
     thresh = thresh_func(to_threshold)
     max_thresh = np.percentile(hist2d[hist2d > thresh], 99)
 
-    if diagnostics:
-        fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(8 * ny / nx, 4))
-
-        ax0.matshow(hist2d, norm=PowerNorm(0.5), vmax=np.percentile(to_threshold, 99), cmap="Greys_r")
-        ax1.matshow(hist2d, norm=PowerNorm(0.5), vmin=thresh, vmax=max_thresh, cmap=greys_limit)
-
-        # plot of histogram
-        fig3, (ax0, ax1) = plt.subplots(2)
-        ax0.hist(hist2d.ravel(), bins=np.logspace(1, np.log10(hist2d.max() + 10), 128), log=True, color="k")
-        ax0.set_xscale("log")
-        ax0.axvline(max_thresh, c="r")
-        ax0.axvline(thresh, c="b")
-
-        to_plot = hist2d[hist2d > 1]
-        to_plot = to_plot[to_plot < max_thresh]
-        ax1.hist(to_plot, bins=128, log=True, color="k")
-        fig3.tight_layout()
-
+    # calculate density in # molecules / unit area (volume) / frame
     frame_range = data.frame.max() - data.frame.min()
-
     frame_density = max_thresh / frame_range
 
     if diagnostics:
-        print(frame_density)
+        fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(8 * nx / ny, 4))
+
+        ax0.matshow(hist2d, norm=PowerNorm(0.5), vmax=max_thresh, cmap="Greys_r")
+        ax0.set_title("Data")
+        ax1.matshow(hist2d, norm=PowerNorm(0.5), vmin=thresh, vmax=max_thresh, cmap=greys_limit)
+        ax0.set_title("Data and Thresholds")
+
+        # plot of histogram
+        fig3, ax0 = plt.subplots(1)
+        ax0.hist(hist2d.ravel(), bins=np.logspace(1, np.log10(hist2d.max() + 10), 128), log=True, color="k")
+        ax0.set_xscale("log")
+        ax0.axvline(max_thresh, c="r", label="99% Thresh = {:g} # / area\n= {:g} # / area / frame".format(max_thresh, frame_density))
+        ax0.axvline(thresh, c="b", label="{} = {:g} # / area".format(thresh_func.__name__, thresh))
+        ax0.legend()
+        ax0.set_title("Histogram of Histogram Values")
+
+        # to_plot = hist2d[hist2d > 1]
+        # to_plot = to_plot[to_plot < max_thresh]
+        # ax1.hist(to_plot, bins=128, log=True, color="k")
+        fig3.tight_layout()
 
     def gap(r):
         if dim == 3:
@@ -1633,3 +1701,114 @@ def plot_fit_df(fits_df, minscale=5e-1, minoffset=-1e-3):
         ax.set_xlabel(fix_title(ax.get_xlabel()))
 
     return (fig, axs), (ax.get_figure(), axs_scatter)
+
+
+def cluster(data, features=["x0", "y0"], scale=True, diagnostics=False, algorithm=HDBSCAN, copy_data=False, **kwargs):
+    """
+    Cluster PALM data based on given features
+    
+    Parameters
+    ----------
+    data : pd.DataFrame
+        DF holding PALM data
+    features : list-like
+        Features of data to use for clustering
+    scale : bool (default True)
+        Prescale the data using sklearn.preprocessing.StandardScaler
+    algorithm : sklearn like cluster algorithm (default HDBSCAN)
+        Algorithm used to cluster the data, must provide `fit` method and `labels_` attribute
+    diagnostics : bool (default True)
+        show diagnostic plots (don't use for large data frames!)
+    copy_data : bool (default False)
+        make a copy of the data, if False a column called group_id will be added to input DF
+
+    All extra keyword arguments will be passed to `algorithm`
+    """
+    X = data[features]
+    if scale:
+        X = StandardScaler().fit_transform(X)
+
+    cluster = algorithm(**kwargs).fit(X)
+
+    if diagnostics:
+        with plt.style.context("dark_background"):
+            fig, (ax0, ax1, ax2) = plt.subplots(3, figsize=(3, 9))
+            data.plot("x0", "y0", c="frame", edgecolor="w", linewidth=0.5, kind="scatter", cmap="gist_rainbow", ax=ax0)
+            ax1.scatter(data.x0, data.y0, c=cluster.labels_, cmap="gist_rainbow")
+            ax2.bar(np.unique(cluster.labels_), np.bincount(cluster.labels_ + 1))
+
+    if copy_data:
+        data = data.copy()
+
+    data["group_id"] = cluster.labels_
+    return data
+
+
+def make_extract_fiducials_func(data):
+    # build and enclose tree for faster compute
+    tree = cKDTree(data[["y0", "x0"]].values)
+
+    def extract_fiducials(df, blobs, radius, minsize=0, maxsize=np.inf):
+        matches = tree.query_ball_point(blobs, radius)
+        new_matches = filter(lambda m: minsize < len(m) < maxsize, matches)
+
+        @dask.delayed
+        def grab(m):
+            return df.iloc[m]
+
+        return [grab(m) for m in new_matches]
+    return extract_fiducials
+
+"""
+# build tree for use later
+extract_fiducials = make_extract_fiducials_func(data)
+
+n = len(samples)
+
+offtimes_list = []
+
+for f in np.logspace(-1,0,3):
+    samples = data_filt.groupby("group_id").mean().sample(frac=f)
+    samples = pdiag.prune_blobs(samples, 2)
+    n = len(samples)
+    
+    for radius in (0.1, 0.2, 0.3, 0.4, 0.5):
+        gc.collect()
+        # extract samples
+        print("Extracting {} samples ...".format(n))
+        %time samples_blinks = extract_fiducials(data, samples[["y0", "x0"]].values, radius)
+        print("Kept samples = {}%".format(int(len(samples_blinks) / n * 100)))
+
+        # calculate localizations per sample
+        # make generator, memory efficient ...
+        # calculate on/off times
+        print("Calculating on and off times ... ")
+        onofftimes = dask.delayed([dask.delayed(pdiag.on_off_times_fast)(y) for y in samples_blinks])
+        with pdiag.pb:
+            onofftimes = onofftimes.compute()
+        ontimes = np.concatenate([b[0] for b in onofftimes]).astype(int)
+        offtimes = np.concatenate([b[1] for b in onofftimes]).astype(int)
+        
+        offtimes_list.append(offtimes)
+
+        fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+
+        fit_plot_ontimes(ontimes, ax=axs[0])
+        _, _, popt = fit_plot_offtimes(offtimes, ax=axs[1])
+
+        for ax in axs[:2]:
+            ax.legend()
+        # 1e-2, 1e-4, 1e-6
+        for gap, cp in zip(*cutoffs(offtimes, (0.99, 0.999, 0.9999, 0.999999))):
+            line = mlines.Line2D([gap, gap, 0], [0, cp, cp], color="r")
+            ax.add_line(line)
+            pdiag.plot_blinks(gap, max_frame, onofftimes, density=True, ax=axs[2])
+        # with pdiag.pb:
+        #     pdiag.plot_blinks(gap, max_frame, samples_blinks=samples_blinks, ax=axs[2])
+
+        t = "Halo-TOMM20 (JF525) 4K Blinking, 20170519, radius = {:.2f}, Sample size = {}".format(radius, len(samples_blinks))
+        fig.suptitle(t, y=1.01)
+        fig.tight_layout()
+        
+        fig.savefig(t + ".png", dpi=300, bbox_inches="tight")
+"""
