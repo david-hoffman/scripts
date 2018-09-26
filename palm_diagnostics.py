@@ -10,7 +10,8 @@ import numpy as np
 import pandas as pd
 # regular plotting
 import matplotlib.pyplot as plt
-from matplotlib.colors import PowerNorm, ListedColormap
+from matplotlib.colors import LogNorm, PowerNorm, ListedColormap
+import matplotlib.lines as mlines
 
 # data loading
 from scipy.io import readsav
@@ -76,8 +77,7 @@ def peakselector_df(path, verbose=False):
     # pull out cgroupparams, set the byteorder to native and set the rownames
     # sav["totalrawdata"] has the raw data, we can use this to get dimensions.
     df = pd.DataFrame(sav["cgroupparams"].byteswap().newbyteorder(), columns=sav["rownames"].astype(str))
-    df.totalrawdata = sav["totalrawdata"]
-    return df
+    return df, sav["totalrawdata"].shape
 
 
 pb = ProgressBar()
@@ -297,6 +297,14 @@ class RawImages(object):
             for meta in metadata
         ]
 
+        def one_zeros(n):
+            """utility function to make an array of True followed by False"""
+            result = np.zeros(n, dtype=bool)
+            result[0] = True
+            return result
+
+        self.first_frames = np.concatenate([one_zeros(meta["shape"][0]) for meta in metadata])
+
         # generate an index
         self.date_idx = pd.DatetimeIndex(
             data=np.concatenate(times),
@@ -501,9 +509,7 @@ class PALMData(object):
         }
 
         # load peakselector data
-        raw_df = peakselector_df(path_to_sav, verbose=verbose)
-        # the dummy attribute won't stick around after casting, so pull it now.
-        totalrawdata = raw_df.totalrawdata
+        raw_df, shape = peakselector_df(path_to_sav, verbose=verbose)
         # don't discard label column if it's being used
         int_cols = ['frame']
         if raw_df["Label Set"].unique().size > 1:
@@ -528,7 +534,7 @@ class PALMData(object):
         # collect garbage
         gc.collect()
 
-        return cls(totalrawdata.shape, processed=processed, grouped=grouped)
+        return cls(shape, processed=processed, grouped=grouped)
 
     def drift_correct(self, sz=25, **kwargs):
         _, self.drift, _, self.drift_fiducials = remove_all_drift(
@@ -593,6 +599,24 @@ class PALMData(object):
         thresh = thresholding.threshold_triangle(cimg)
         return cimg > thresh
 
+    def threshold(self, data="grouped_nf", diagnostics=True):
+        """Find a threshold that discriminates between biology and background"""
+        # pull internal data structure
+        data = getattr(self, data)
+        # generate histogram
+        cimg = gen_img(self.shape, data, mag=1, hist=True, cmap=None)
+        # find threshold
+        thresh = thresholding.threshold_triangle(cimg)
+        if diagnostics:
+            ny, nx = cimg.shape
+            fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(8 * nx / ny, 4))
+
+            ax0.matshow(cimg, norm=PowerNorm(0.5), cmap="Greys_r")
+            ax0.set_title("Data")
+            ax1.matshow(cimg, norm=PowerNorm(0.5), vmin=thresh, cmap=greys_limit)
+            ax0.set_title("Data and Thresholds")
+        return thresh
+
     def make_fiducial_mask(self, radius):
         """A mask at fiducial locations
 
@@ -603,10 +627,129 @@ class PALMData(object):
             mask[circle(y, x, radius, shape=self.shape)] = 1
         self.fiducial_mask = mask.astype(bool)
 
+    def hist(self, col="nphotons", **kwargs):
+        """Plot # of photons as histograms"""
+        def plotter(df, ax):
+            """utility function"""
+            data = df[col]
+            bins = log_bins(data)
+            ax = data.hist(bins=bins, log=True, density=True, histtype="stepfilled", ax=ax)
+            ax.set_xscale("log")
+            # add labels
+            mean = data.mean()
+            ax.axvline(mean, c="k", label="Mean = {:.2g}".format(mean))
+            median = data.median()
+            ax.axvline(median, c="k", ls="--", label="Median = {:.2g}".format(median))
+            if col == "nphotons":
+                mode = data.astype(int).mode().values[0]
+                ax.axvline(mode, c="k", ls=":", label="Mode = {:.2g}".format(mode))
+            # annotate
+            ax.legend()
+            return ax
 
-def exponent(xdata, amp, rate, offset):
-    """Utility function to fit nonlinearly"""
-    return amp * np.exp(rate * xdata) + offset
+        fig, all_axs = plt.subplots(2, sharex=True, sharey=False, **kwargs)
+        (ax_p, ax_g) = all_axs
+
+        plotter(self.drift_corrected_nf, ax_p)
+        plotter(self.grouped_nf, ax_g)
+
+        ax_p.set_title("Per Frame")
+        ax_g.set_title("Per Group")
+
+        ax_g.set_xlabel("# of Photons")
+
+        fig.tight_layout()
+
+        return fig, (ax_p, ax_g)
+
+    def sigma_hist(self, xymax=25, zmax=250, pixelsize=130, **kwargs):
+        """Plot precisions as histograms"""
+        # default kwargs for figsize
+        default_kwargs = dict(figsize=(12, 8))
+        default_kwargs.update(kwargs)
+
+        # set up figure
+        fig, all_axs = plt.subplots(2, 3, sharex="col", **default_kwargs)
+        (axs_p, axs_g) = all_axs
+
+        sigmas = ["sigma_x", "sigma_y", "sigma_z"]
+
+        # loop through and start plotting
+        for axs, data in zip((axs_p, axs_g), (self.drift_corrected_nf, self.grouped_nf)):
+            # convert to nm
+            data_nm = data[sigmas] * (pixelsize, pixelsize, 1)
+            # make bins
+            bins = (np.linspace(0, m, 128) for m in (xymax, xymax, zmax))
+            # iterate through data
+            for ax, d, b in zip(axs, data_nm, bins):
+                dd = data_nm[d]
+                filt = dd < b.max()
+                dd = dd[filt]
+                try:
+                    # if grouped plot grouped and not grouped as separate hists
+                    groupsize = data.groupsize[filt]
+                    g0 = dd[groupsize > 1]
+                    g0.hist(bins=b, histtype="stepfilled", ax=ax, zorder=1, alpha=0.7, density=True)
+                    median = g0.median()
+                    ax.axvline(median, c="k", ls=":", label="{:.1f}".format(median))
+                    dd = dd[groupsize == 1]
+                except AttributeError:
+                    pass
+                dd.hist(bins=b, histtype="stepfilled", ax=ax, zorder=0, alpha=0.7, density=True)
+                median = dd.median()
+                ax.axvline(median, c="k", ls="--", label="{:.1f}".format(median))
+                ax.set_yticks([])
+                ax.legend()
+
+        # label plots
+        for ax, t in zip(axs_p, data_nm):
+            ax.set_title("$\\" + t + "$")
+
+        axs_p[0].set_ylabel("Per Frame")
+        axs_g[0].set_ylabel("Per Group")
+
+        axs_g[1].set_xlabel("Localization Precision (nm)")
+
+        # update middle legend
+        grouped_text, single_text = axs_g[1].legend().get_texts()
+        grouped_text.set_text("Grouped Median Precision " + grouped_text.get_text())
+        single_text.set_text("Single Median Precision " + single_text.get_text())
+        
+        fig.tight_layout()
+
+        fig, all_axs
+
+    def filter(self, filter_func=None, **kwargs):
+        """Filter internal DataFrames, if myfilter is dict, assume that it's
+        maximum and minimums for each column, if it's a callable assume it
+        takes a DataFrame and returns a DataFrame."""
+
+        # build the filter function
+        def filter_func2(df):
+            """Wrap both filters into one"""
+            if filter_func is not None:
+                df = filter_func(df)
+
+            filt_idx = pd.Series(data=np.ones(len(df), dtype=bool), index=df.index)
+
+            for k, v in kwargs.items():
+                vmin, vmax = v
+                filt_idx &= (vmin < df[k]) & (df[k] < vmax)
+
+            return df[filt_idx]
+
+        to_filt = "processed", "drift_corrected", "grouped"
+        new_params = {"shape": self.shape, "drift": self.drift}
+
+        # apply the function to all interal dataframes.
+        for param in to_filt:
+            df = getattr(self, param, None)
+            if df is not None:
+                df = filter_func2(df)
+
+            new_params[param] = df
+
+        return self.__class__(**new_params)
 
 
 class Data405(object):
@@ -644,14 +787,18 @@ class Data405(object):
         path = pd.read_hdf(fname, "path405").values[0]
         return cls(path)
 
+    def exponent(self, xdata, amp, rate, offset):
+        """utility function"""
+        return amp * np.exp(rate * xdata) + offset
+
     def fit(self, lower_limit, upper_limit=None):
         # we know that the laser is subthreshold below 0.45 V and the max is 5 V, so we want to limit the data between these two
         data_df = self.data
         if upper_limit is None:
             upper_limit = data_df.reactivation.max()
         data_df_crop = data_df[(data_df.reactivation > lower_limit) & (data_df.reactivation < upper_limit)].dropna()
-        self.popt, self.pcov = curve_fit(exponent, *data_df_crop[["date_delta", "reactivation"]].values.T)
-        data_df["fit"] = exponent(data_df["date_delta"], *self.popt)
+        self.popt, self.pcov = curve_fit(self.exponent, *data_df_crop[["date_delta", "reactivation"]].values.T)
+        data_df["fit"] = self.exponent(data_df_crop["date_delta"], *self.popt)
         self.fit_win = data_df_crop.date_delta.min(), data_df_crop.date_delta.max()
 
     def plot(self, ax=None, limits=True, lower_limit=0.45, upper_limit=None):
@@ -671,7 +818,7 @@ class Data405(object):
             if limits:
                 for i, edge in enumerate(self.fit_win):
                     if i:
-                        label = "fit limits"
+                        label = "Fit Limits"
                     else:
                         label = None
                     ax.axvline(edge, color="r", label=label)
@@ -700,24 +847,10 @@ def stretched_exp(xdata, a, b):
     return a * np.exp(-xdata ** b)
 
 
-def multi_exp(xdata, *args):
-    """Power and exponent"""
-    odd = len(args) % 2
-    if odd:
-        offset = args[-1]
-    else:
-        offset = 0
-    res = np.ones_like(xdata) * offset
-    for i in range(0, len(args) - odd, 2):
-        a, k = args[i:i + 2]
-        res += a * np.exp(-k * xdata)
-    return res
-
-
 class PALMExperiment(object):
     """A simple class to organize our experimental data"""
 
-    def __init__(self, raw, palm, activation):
+    def __init__(self, raw, palm, activation, cached_data=None):
         """To initialize the experiment we need raw data, palm data and activation
         each of these are RawImages, PALMData and Data405 objects respectively"""
 
@@ -732,19 +865,34 @@ class PALMExperiment(object):
         # new time index with 0 at start of activation
         self.time_idx = (self.raw.date_idx - self.activation_start) / np.timedelta64(1, 'h')
 
+        # frame at which activation begins
+        self.frame_start = np.abs(self.time_idx).argmin()
+
+        if cached_data is None:
+            self.cached_data = pd.DataFrame(index=self.time_idx)
+        else:
+            self.cached_data = cached_data
+            self.cached_data.index = self.time_idx
+
     @classmethod
     def load(cls, fname):
         """Load data from a pandas managed HDF5 store"""
         raw = RawImages.load(fname)
         palm = PALMData.load(fname)
         activation = Data405.load(fname)
-        return cls(raw, palm, activation)
+        try:
+            cached_data = pd.read_hdf(fname, "cached_data")
+        except KeyError:
+            logger.info("No cached data found")
+            cached_data = None
+        return cls(raw, palm, activation, cached_data)
 
     def save(self, fname):
         """Save data to a pandas managed HDF store"""
         self.raw.save(fname)
         self.palm.save(fname)
         self.activation.save(fname)
+        self.cached_data.to_hdf(fname, "cached_data")
 
     def masked_agg(self, masktype, agg_func=np.median):
         """Mask and aggregate raw data along frame direction with agg_func
@@ -752,7 +900,7 @@ class PALMExperiment(object):
         Save results on RawImages object"""
         # make sure our agg_func works with masked arrays
         agg_func = getattr(np.ma, agg_func.__name__)
-        
+
         # we have to reverse the mask for how np.ma.masked_array works
         if masktype.lower() == "data":
             mask = ~self.palm.data_mask
@@ -762,7 +910,7 @@ class PALMExperiment(object):
             mask = (self.palm.fiducial_mask | self.palm.data_mask)
         else:
             raise ValueError("masktype {} not recognized, needs to be one of 'data', 'fiducials' or 'background'".format(masktype))
-        
+
         # figure out how to split the drift to align with raw data
         cut_points = np.append(0, self.raw.lengths).cumsum()
 
@@ -771,10 +919,10 @@ class PALMExperiment(object):
             """Drift correct raw data (based on PALM drift correction), mask and aggregate"""
             # calculate chunked mask
             assert len(chunk) == len(chunked_shifts), "Lengths don't match"
-            
+
             # convert image data to float
             chunk = chunk.astype(float)
-            
+
             # drift correct the chunk
             shifted_chunk = np.array([
                 # we're drift correcting the *data* so negative shifts
@@ -782,14 +930,14 @@ class PALMExperiment(object):
                 ndi.shift(data, (-y, -x), order=1, cval=np.nan)
                 for data, (y, x) in zip(chunk, chunked_shifts)
             ])
-            
+
             # True indicates a masked (i.e. invalid) data.
             # cut out areas that were shifted out of frame
             extended_mask = np.array([mask] * len(shifted_chunk)) | ~np.isfinite(shifted_chunk)
-            
+
             # mask drift corrected raw data
             shifted_masked_array = np.ma.masked_array(shifted_chunk, extended_mask)
-            
+
             # return aggregated data along frame axis
             return np.asarray(agg_func(shifted_masked_array, (1, 2)))
 
@@ -804,17 +952,17 @@ class PALMExperiment(object):
 
         # get masked results
         masked_result = np.concatenate(dask.delayed(to_compute).compute(scheduler="processes"))
-        
+
         # save these attributes on the RawImages Object
         attrname = "masked_" + masktype.lower() + "_" + agg_func.__name__
         logger.info("Setting {}".format(attrname))
-        setattr(self.raw, attrname, masked_result)
+        self.cached_data[attrname] = masked_result
 
         return masked_result
 
     def agg(self, agg_func=np.median):
         """Aggregate raw data along frame direction with agg_func"""
-        
+
         @dask.delayed
         def agg_sub(chunk):
             """Calculate agg"""
@@ -823,11 +971,11 @@ class PALMExperiment(object):
         to_compute = dask.delayed([agg_sub(lazy_imread(path)) for path in self.raw.paths])
 
         result = np.concatenate(to_compute.compute(scheduler="processes"))
-        
+
         # save these attributes on the RawImages Object
         attrname = masktype.lower() + "_" + agg_func.__name__
         logger.info("Setting {}".format(attrname))
-        setattr(self.raw, attrname, result)
+        self.cached_data[attrname] = result
 
         return result
 
@@ -882,7 +1030,7 @@ class PALMExperiment(object):
     @cached_property
     def intensity(self):
         """Median intensity within masked (data) area, in # of photons"""
-        return pd.Series(data=self.raw.masked_data_median - 100, index=self.time_idx)
+        return pd.Series(data=self.cached_data.masked_data_median - 100, index=self.time_idx)
 
     @cached_property
     def contrast_ratio(self):
@@ -891,10 +1039,10 @@ class PALMExperiment(object):
         # contrast after feedback is enabled
         # denominator is average number of photons per pixel
         return self.nphotons / self.intensity
-    
+
     def plot_feedback(self, **kwargs):
         """Make plots for time when feedback is on"""
-        
+
         # make the figure
         fig, axs = plt.subplots(4, figsize=(6, 12), sharex=True)
 
@@ -908,12 +1056,12 @@ class PALMExperiment(object):
         axs[0].set_title("Feedback Only")
 
         fig.tight_layout()
-        
+
         return fig, axs
 
     def plot_all(self, **kwargs):
         """Plot entire experiment"""
-        
+
         # make the figure
         fig, axs = plt.subplots(4, figsize=(6, 12), sharex=True)
 
@@ -928,7 +1076,7 @@ class PALMExperiment(object):
             ax.axvline(0, color="r")
 
         fig.tight_layout()
-        
+
         return fig, axs
 
     def plot_nofeedback(self):
@@ -943,7 +1091,7 @@ class PALMExperiment(object):
         fig.tight_layout()
         return fig, axs
 
-    def _plot_sub(self, axs=None, s=slice(None, None, None)):
+    def _plot_sub(self, axs=None, s=slice(None, None, None), no_first=True):
         """Plot many statistics for a PALM photophysics expt"""
 
         # make the figure
@@ -961,10 +1109,14 @@ class PALMExperiment(object):
         data = self.intensity, self.counts, self.contrast_ratio
 
         for ax, df, title in zip(axs, data, titles):
+            if no_first:
+                df = df[~self.raw.first_frames]
             df = df.loc[s]
-            df.plot(ax=ax)
-            df.rolling(1000, 0, center=True).mean().plot(ax=ax)
+            df.plot(ax=ax, label="Raw data")
+            df.rolling(1000, 0, center=True).mean().plot(ax=ax, label="Rolling mean (1000)")
             ax.set_ylabel(title)
+
+        axs[0].legend()
 
         return fig, axs
 
@@ -1279,7 +1431,7 @@ def fit_and_plot_power_law(trace, ul, offset, xmax, ll=None, ax=None, density=Fa
         ymin /= N
 
     # plot on loglog plot
-    ax.loglog(x, y, linestyle="steps-mid", label="Data")
+    ax.loglog(x, y, ".", label="Data")
     ax.loglog(x, ty, label=eqn.format(*popt[1:]))
     ax.set_ylim(ymin=ymin)
 
@@ -1333,31 +1485,32 @@ def plot_blinks(gap, max_frame, onofftimes=None, samples_blinks=None, ax=None, m
             err = e
             continue
     else:
-        raise err
+        logger.warn(err)
+        alpha = mu = None
     # calculate histograms
     x = np.arange(blinks.max() + 1)[1:]
     y = np.bincount(blinks)[1:]
+    label = "$\mu_{{data}}={:.2f}$, $p_{{50^{{th}}}}={}$".format(blinks.mean(), int(np.median(blinks)))
     # normalize
     N = y.sum()
     y = y / N
 
     # plot fit
-    fit = NegBinom(alpha, mu).pmf(x) / (1 - NegBinom(alpha, mu).pmf(0))
+    if alpha:
+        fit = NegBinom(alpha, mu).pmf(x) / (1 - NegBinom(alpha, mu).pmf(0))
+        label += "\n" + r"$\alpha={:.2f}$, $\mu_{{\lambda}}={:.2f}$, $\sigma_{{\lambda}}={:.2f}$".format(alpha, mu, mu / np.sqrt(alpha))
+        if density:
+            ax.set_ylabel("Frequency")
+        else:
+            ax.set_ylabel("Occurences (#)")
+            fit = fit * N
+            y = y * N
 
-    label = "$\mu_{{data}}={:.2f}$, $p_{{50^{{th}}}}={}$\n".format(blinks.mean(), int(np.median(blinks)))
-    label += r"$\alpha={:.2f}$, $\mu_{{\lambda}}={:.2f}$, $\sigma_{{\lambda}}={:.2f}$".format(alpha, mu, mu / np.sqrt(alpha))
+        ax.step(x, fit, where="mid", color="k", linestyle=":")
+
     label += "\nGap = {:g}, % Trace = {:.1%}".format(gap, gap / max_frame)
 
-    if density:
-        ax.set_ylabel("Frequency")
-    else:
-        ax.set_ylabel("Occurences (#)")
-        fit = fit * N
-        y = y * N
-
     ax.step(x, y, label=label, where="mid")
-    ax.step(x, fit, where="mid", color="k", linestyle=":")
-
     ax.legend()
     ax.set_xlim(xmin=0, xmax=30)
     ax.set_xlabel("# of events / molecule")
@@ -1744,20 +1897,195 @@ def cluster(data, features=["x0", "y0"], scale=True, diagnostics=False, algorith
     return data
 
 
+def fit_plot_offtimes(offtimes, ax=None):
+    """Utility function for fitting and plotting"""
+    fig, ax, popt, ul = fit_and_plot_power_law(offtimes, None, None, None, ax=ax, norm=True)
+    # remove xmin lines
+    ax.get_lines().pop().remove()
+    ax.set_title("Off Times")
+    return fig, ax, popt
+
+
+def fit_plot_ontimes(ontimes, ax=None):
+    """Utility function for fitting and plotting"""
+    power = PowerLaw(ontimes)
+    power.fit(xmin_max=20)
+    fig, ax = power.plot(ax, norm=True)
+    # remove xmin lines
+    ax.get_lines().pop().remove()
+    ax.set_title("On Times")
+    return fig, ax, power
+
+
+def cutoffs(offtimes, percentiles):
+    """Find out when the curve falls to percent of max"""
+    percentiles = np.asarray(percentiles)
+
+    # turn into histogram
+    y = np.bincount(offtimes)[1:]
+    x = np.arange(offtimes.max()) + 1
+
+    # get conjugate percentiles
+    cp = 1 - percentiles
+
+    # norm y
+    ynorm = (y / y[0])
+
+    # find percentiles that will work with our data
+    valid_cps = ((ynorm[:, None] < cp) & (ynorm[:, None] > np.zeros_like(cp))).any(0)
+    cp = cp[valid_cps]
+
+    # search for these in the hist
+    search = np.abs(ynorm[:, None] - cp[None])
+    minval = search.min(0)
+
+    # take median of any valid values
+    cuts = np.array([int(np.median(x[filt])) for filt in (search == minval).T])
+    return cuts, cp
+
+
 def make_extract_fiducials_func(data):
+    """Returns a function for extracting fiducials from data"""
     # build and enclose tree for faster compute
     tree = cKDTree(data[["y0", "x0"]].values)
 
-    def extract_fiducials(df, blobs, radius, minsize=0, maxsize=np.inf):
+    @dask.delayed
+    def grab(m):
+        return data.iloc[m]
+
+    def extract_fiducials(blobs, radius, minsize=0, maxsize=np.inf):
         matches = tree.query_ball_point(blobs, radius)
         new_matches = filter(lambda m: minsize < len(m) < maxsize, matches)
 
-        @dask.delayed
-        def grab(m):
-            return df.iloc[m]
-
         return [grab(m) for m in new_matches]
+
     return extract_fiducials
+
+
+def get_onofftimes(samples, extract_radius, data=None, extract_fiducials=None, prune_radius=2):
+    """Calculate onofftimes from samples"""
+    if extract_fiducials is None:
+        if data is None:
+            raise ValueError("Must pass data or extract_fiducials function")
+        extract_fiducials = make_extract_fiducials_func(data)
+
+    samples = prune_blobs(samples, prune_radius)
+
+    # extract samples
+    n = len(samples)
+    print("Extracting {} samples ...".format(n))
+    samples_blinks = extract_fiducials(samples[["y0", "x0"]].values, extract_radius)
+    print("Kept samples = {}%".format(int(len(samples_blinks) / n * 100)))
+
+    # calculate on/off times
+    print("Calculating on and off times ... ")
+    onofftimes = dask.delayed([dask.delayed(on_off_times_fast)(y) for y in samples_blinks]).compute()
+
+    return onofftimes, samples_blinks
+
+
+def plot_onofftimes(onofftimes, max_frame):
+    """Plot on and off times"""
+    # now compute on and offtimes
+    ontimes, offtimes = get_on_and_off_times(onofftimes)
+
+    fig, axs = plt.subplots(2, 2, figsize=(10, 10))
+
+    _, _, power = fit_plot_ontimes(ontimes, ax=axs[0, 0])
+    _, _, popt = fit_plot_offtimes(offtimes, ax=axs[0, 1])
+
+    for ax in axs[0]:
+        ax.legend()
+    # 1e-2, 1e-4, 1e-6
+    my_cutoffs = cutoffs(offtimes, (0.99, 0.999, 0.9999))
+    for gap, cp in zip(*my_cutoffs):
+        line = mlines.Line2D([gap, gap, 0], [0, cp, cp], color="r")
+        ax.add_line(line)
+        plot_blinks(gap, max_frame, onofftimes, density=True, ax=axs[1, 1])
+
+    _, ratio = calc_onoff_ratio(onofftimes)
+
+    ax = axs[1, 0]
+    hist_and_cumulative(ratio, ax=ax, log=True)
+    ax.set_xlabel("Ratio of On Time to Off Time")
+    ax.set_title("Dynamic Contrast Ratio")
+    median = np.median(ratio)
+    ax.axvline(median, ls=":", color="k", label="Median = {:.2g}".format(median))
+    ax.legend(loc='lower right')
+
+    return fig, axs
+
+
+def get_on_and_off_times(onofftimes, clip=False):
+    """Get on times and off times from onofftimes"""
+    if clip:
+        s = slice(None, -1)
+    else:
+        s = slice(None)
+    ontimes = np.concatenate([b[0][s] for b in onofftimes]).astype(int)
+    offtimes = np.concatenate([b[1] for b in onofftimes]).astype(int)
+    # p = stats.pearsonr(offtimes, ontimes)
+    # s = stats.spearmanr(offtimes, ontimes)
+
+    # print("Pearson correlation {:.2g}, p-value {:.2g}".format(*p))
+    # print("Spearman correlation {:.2g}, p-value {:.2g}".format(*s))
+    return ontimes, offtimes
+
+
+def calc_onoff_ratio(onofftimes):
+    ontimes, offtimes = get_on_and_off_times(onofftimes, clip=True)
+    # ratio of on time to following off time
+    ratio = ontimes / offtimes
+    # ratio2 is the total ontime for a molecule divided by total on time
+    ratio2 = np.array([b[0][:-1].sum() / b[1].sum() for b in onofftimes if b[1].sum() > 0])
+    ratio2 = ratio2[np.isfinite(ratio2)]
+    return ratio, ratio2
+
+
+def hist_and_cumulative(data, ax=None, log=False):
+    if ax is None:
+        fig, ax = plt.subplots()
+    else:
+        fig = ax.get_figure()
+    if log:
+        bins = np.logspace(np.log10(data.min()), np.log10(data.max()), 64)
+    else:
+        bins = np.logspace(data.min(), data.max(), 64)
+    ax.hist(data, bins=bins, density=True, log=False, histtype="step")
+    ax.set_ylabel("PDF")
+    if log:
+        ax.set_xscale("log")
+
+    sorted_data = np.sort(data)
+    N = len(sorted_data)
+    b = np.arange(N) / N
+
+    twin_ax = ax.twinx()
+    color = ax._get_lines.get_next_color()
+    twin_ax.plot(sorted_data, b, color=color, ls="steps-mid")
+    twin_ax.tick_params(axis='y', labelcolor=color)
+    twin_ax.set_ylabel("CDF", color=color)
+    twin_ax.set_ylim(ymin=0)
+
+    return fig, ax
+
+
+def calc_onframes(df):
+    """Pull frames where molecule turns on"""
+    # make a trace
+    trace = np.sort(df.frame.unique())
+
+    # calculate the spacing between events
+    diff = np.append(1, np.diff(trace))
+
+    # frames where this molecule turns on
+    on_idx = diff > 1
+
+    # first frame should be true
+    on_idx[0] = True
+    on_frames = trace[on_idx]
+
+    return pd.DataFrame(data=np.stack((on_frames, np.arange(len(on_frames)) + 1)).T, columns=["frame", "occurence"])
 
 """
 # build tree for use later
