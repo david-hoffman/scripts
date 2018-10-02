@@ -48,7 +48,7 @@ from scipy.spatial import cKDTree
 from scipy.stats import poisson
 
 # override any earlier imports
-from peaks.lm import curve_fit
+from dphutils.lm import curve_fit
 from scipy.optimize import nnls
 
 from sklearn.cluster import AffinityPropagation
@@ -313,6 +313,14 @@ class RawImages(object):
 
         assert len(self.date_idx) == len(self.raw), "Date index and Raw data don't match, {}, {}".format(self.date_idx, self.raw)
 
+    def __repr__(self):
+        """"""
+        return (
+            "RawImages:\n" +
+            "   paths: {} ... {}\n".format(self.paths[0], self.paths[-1]) +
+            "   Timestamps: {} ... {}".format(self.date_idx[0], self.date_idx[-1])
+        )
+
     @classmethod
     def create(cls, paths_to_raw, read_all=False):
         """Create a RawImages object from paths to tif files"""
@@ -444,11 +452,26 @@ class PALMData(object):
 
     def __init__(self, shape, *, processed=None, drift=None, drift_corrected=None, grouped=None):
         """"""
+        assert len(shape) == 2
         self.shape = shape
         self.processed = processed
         self.drift = drift
         self.drift_corrected = drift_corrected
         self.grouped = grouped
+
+    def __repr__(self):
+        """"""
+        internal_params = []
+        temp = "No data"
+        for name in self.save_list:
+            attr = getattr(self, name)
+            internal_params.append((name, attr is not None))
+            if attr is not None and name != "drift":
+                temp = attr.columns
+        return ("PALMData with shape = {}\n".format(self.shape) +
+                "\n".join(["{} ---> {}".format(k, v) for k, v in internal_params]) +
+                "\nColumns ---> {}".format(temp)
+                )
 
     @classmethod
     def load_sav(cls, path_to_sav, verbose=False, processed_only=False, include_width=False):
@@ -547,8 +570,11 @@ class PALMData(object):
 
     def group(self, r, zscaling=10):
         """group the drift corrected data"""
-        gap, thresh = check_density(self.shape, self.drift_corrected, 1, dim=3, zscaling=zscaling)
+        gap, thresh = check_density(self.shape, self.drift_corrected, 1, dim=3, zscaling=zscaling * 130)
         mygap = int(gap(r))
+        self.group_radius = r
+        self.group_gap = mygap
+        self.group_thresh = thresh
         logger.info("Grouping gap is being set to {}".format(mygap))
         self.grouped = slab_grouper([self.drift_corrected], radius=r, gap=mygap, zscaling=zscaling * 130, numthreads=48)[0]
 
@@ -647,20 +673,26 @@ class PALMData(object):
             ax.legend()
             return ax
 
-        fig, all_axs = plt.subplots(2, sharex=True, sharey=False, **kwargs)
-        (ax_p, ax_g) = all_axs
+        default_kwargs = dict(figsize=(5,10))
+        default_kwargs.update(kwargs)
+        fig, all_axs = plt.subplots(3, sharex=True, sharey=False, **default_kwargs)
+        (ax_p, ax_s, ax_g) = all_axs
 
         plotter(self.drift_corrected_nf, ax_p)
-        plotter(self.grouped_nf, ax_g)
+        plotter(self.grouped_nf[self.grouped_nf.groupsize == 1], ax_s)
+        plotter(self.grouped_nf[self.grouped_nf.groupsize != 1], ax_g)
 
         ax_p.set_title("Per Frame")
-        ax_g.set_title("Per Group")
+        ax_s.set_title("Grouped Singles")
+        ax_g.set_title("Grouped Groups")
+
+        ax_s.set_ylabel("Probability Density")
 
         ax_g.set_xlabel("# of Photons")
 
         fig.tight_layout()
 
-        return fig, (ax_p, ax_g)
+        return fig, all_axs
 
     def sigma_hist(self, xymax=25, zmax=250, pixelsize=130, **kwargs):
         """Plot precisions as histograms"""
@@ -714,10 +746,10 @@ class PALMData(object):
         grouped_text, single_text = axs_g[1].legend().get_texts()
         grouped_text.set_text("Grouped Median Precision " + grouped_text.get_text())
         single_text.set_text("Single Median Precision " + single_text.get_text())
-        
+
         fig.tight_layout()
 
-        fig, all_axs
+        return fig, all_axs
 
     def filter(self, filter_func=None, **kwargs):
         """Filter internal DataFrames, if myfilter is dict, assume that it's
@@ -777,6 +809,10 @@ class Data405(object):
         # calculate date delta in hours
         self.data['date_delta'] = (self.data.index - self.data.index.min()) / np.timedelta64(1, 'h')
 
+    def __repr__(self):
+        """A representation of the Data405 Object"""
+        return "<Data405({})> Begin activation = {}".format(self.path, self.data.index.min())
+
     def save(self, fname):
         """"""
         pd.Series(self.path).to_hdf(fname, "path405")
@@ -791,19 +827,38 @@ class Data405(object):
         """utility function"""
         return amp * np.exp(rate * xdata) + offset
 
-    def fit(self, lower_limit, upper_limit=None):
-        # we know that the laser is subthreshold below 0.45 V and the max is 5 V, so we want to limit the data between these two
+    def fit(self, lower_limit, upper_limit=np.inf):
+        """Fit the internal reactivation data (V or mW) to an exponentially increasing fucntion
+        between `lower_limit` and `upper_limit`"""
+        # we know that the laser is subthreshold below 0.45 V and the max is 5 V,
+        # so we want to limit the data between these two
         data_df = self.data
-        if upper_limit is None:
-            upper_limit = data_df.reactivation.max()
+
+        # make sure we're in range
+        upper_limit = min(upper_limit, data_df.reactivation.max())
+
+        # clip data, dropping previous fit column if it exists
+        data_df.drop("fit", axis=1, inplace=True, errors='ignore')
         data_df_crop = data_df[(data_df.reactivation > lower_limit) & (data_df.reactivation < upper_limit)].dropna()
+
+        # fit data
         self.popt, self.pcov = curve_fit(self.exponent, *data_df_crop[["date_delta", "reactivation"]].values.T)
-        data_df["fit"] = self.exponent(data_df_crop["date_delta"], *self.popt)
+        data_df.loc[data_df_crop.index, "fit"] = self.exponent(data_df_crop["date_delta"], *self.popt)
+
         self.fit_win = data_df_crop.date_delta.min(), data_df_crop.date_delta.max()
 
-    def plot(self, ax=None, limits=True, lower_limit=0.45, upper_limit=None):
+    def plot(self, ax=None, limits=True, lower_limit=None, upper_limit=None):
+        """Plot reactivation data on axis between limits"""
+        if lower_limit is None:
+            lower_limit = self.calibrate(0.45)
+
+        if upper_limit is None:
+            upper_limit = np.inf
+
         if ax is None:
             fig, ax = plt.subplots()
+        else:
+            fig = ax.get_figure()
         # check if enough data exists to fit
         if (self.data["reactivation"] > lower_limit).sum() > 100:
             # this is fast so no cost
@@ -833,6 +888,8 @@ class Data405(object):
             ax.set_ylabel("405 nm Voltage")
 
         ax.legend(loc="best")
+
+        return fig, ax
 
 
 def weird(xdata, *args):
@@ -873,6 +930,12 @@ class PALMExperiment(object):
         else:
             self.cached_data = cached_data
             self.cached_data.index = self.time_idx
+
+    def __repr__(self):
+        """A representation of this class"""
+        sub_reps = ("\n" + "+" * 80 + "\n").join([repr(self.raw), repr(self.palm), repr(self.activation), repr(self.cached_data.columns)])
+        top_str = "This PALM Experiment consists of:\n" + "=" * 80 + "\n"
+        return top_str + sub_reps
 
     @classmethod
     def load(cls, fname):
@@ -1054,12 +1117,13 @@ class PALMExperiment(object):
 
         # set figure title
         axs[0].set_title("Feedback Only")
+        axs[0].legend()
 
         fig.tight_layout()
 
         return fig, axs
 
-    def plot_all(self, **kwargs):
+    def plot_all(self, fit_start=None, components=3, **kwargs):
         """Plot entire experiment"""
 
         # make the figure
@@ -1075,20 +1139,49 @@ class PALMExperiment(object):
         for ax in axs:
             ax.axvline(0, color="r")
 
+        if fit_start is not None:
+            self._fit_and_add_to_plot(axs[1], fit_start, components)
+            axs[1].legend()
+        else:
+            axs[0].legend()
+
         fig.tight_layout()
 
         return fig, axs
 
-    def plot_nofeedback(self):
+    def _fit_and_add_to_plot(self, ax, fit_start, components):
+        # pull data to fit
+        fit_data = self.counts.loc[fit_start:0].dropna()
+        # make index
+        xdata = (fit_data.index - fit_data.index.min()).values
+        # fit the data
+        popt, pcov = multi_exp_fit(fit_data.values, xdata, components, method="mle")
+
+        # make the label
+        label_base = "$y(t) = " + "{:+.3g} e^{{-{:.2g}t}}" * (len(popt) // 2) + " {:+.2g}$" * (len(popt) % 2)
+
+        # add the fit line and legend
+        ax.plot(fit_data.index, multi_exp(xdata, *popt), label=label_base.format(*popt), ls="--")
+
+    def plot_nofeedback(self, fit_start=None, components=3):
         """Plot many statistics for a PALM photophysics expt"""
-        
+
         # end at 0 time
         fig, axs = self._plot_sub(None, s=slice(None, 0))
 
         axs[0].set_title("No Feedback")
         axs[-1].set_xlabel("Time (hours)")
 
+        # add a fit to the counts decay
+        # pull axis we want
+        if fit_start is not None:
+            self._fit_and_add_to_plot(axs[1], fit_start, components)
+            axs[1].legend()
+        else:
+            axs[0].legend()
+
         fig.tight_layout()
+
         return fig, axs
 
     def _plot_sub(self, axs=None, s=slice(None, None, None), no_first=True):
@@ -1116,8 +1209,6 @@ class PALMExperiment(object):
             df.rolling(1000, 0, center=True).mean().plot(ax=ax, label="Rolling mean (1000)")
             ax.set_ylabel(title)
 
-        axs[0].legend()
-
         return fig, axs
 
 
@@ -1135,7 +1226,7 @@ def add_line(ax, data, func=np.mean, fmt_str=":.0f", **kwargs):
 
 
 def log_bins(data, nbins=128):
-    minmax = np.nanmin(data), np.nanmax(data)
+    minmax = np.nanmin(data), np.nanmax(data) + 1
     logminmax = np.log10(minmax)
     return np.logspace(*logminmax, num=nbins)
 
@@ -1566,7 +1657,7 @@ def prune_blobs(df, radius):
         # indices of pruned blobs
         pruned_blobs = set()
         # loop through conflicts
-        for idx_a, idx_b in tqdm.tqdm(list_of_conflicts):
+        for idx_a, idx_b in tqdm.tqdm(list_of_conflicts, desc="Removing conflicts"):
             # see if we've already pruned one of the pair
             if (idx_a not in pruned_blobs) and (idx_b not in pruned_blobs):
                 # compare based on amplitude
@@ -1583,7 +1674,7 @@ def prune_blobs(df, radius):
         ]]
 
 
-def check_density(shape, data, mag, thresh_func=thresholding.threshold_triangle, diagnostics=True, pix_size=130, dim=3, zscaling=5):
+def check_density(shape, data, mag, thresh_func=thresholding.threshold_triangle, diagnostics=True, dim=3, zscaling=5 * 130):
     """Check the density of the data and find the 99th percentile density
 
     Return a function that calculates maximal grouping gap from grouping radius
@@ -1592,7 +1683,7 @@ def check_density(shape, data, mag, thresh_func=thresholding.threshold_triangle,
 
     # generate the initial histograms of the data
     if dim == 3:
-        hist3d = save_img_3d(shape, data, None, zspacing=pix_size * zscaling / mag, mag=mag, hist=True)
+        hist3d = save_img_3d(shape, data, None, zspacing=zscaling / mag, mag=mag, hist=True)
         hist2d = montage(hist3d)
     elif dim == 2:
         hist2d = gen_img(shape, data, mag=mag, hist=True, cmap=None).astype(int)
@@ -1984,12 +2075,15 @@ def get_onofftimes(samples, extract_radius, data=None, extract_fiducials=None, p
     return onofftimes, samples_blinks
 
 
-def plot_onofftimes(onofftimes, max_frame):
+def plot_onofftimes(onofftimes, max_frame, axs=None):
     """Plot on and off times"""
     # now compute on and offtimes
     ontimes, offtimes = get_on_and_off_times(onofftimes)
 
-    fig, axs = plt.subplots(2, 2, figsize=(10, 10))
+    if axs is None:
+        fig, axs = plt.subplots(2, 2, figsize=(10, 10))
+    else:
+        fig = axs.ravel()[0].get_figure()
 
     _, _, power = fit_plot_ontimes(ontimes, ax=axs[0, 0])
     _, _, popt = fit_plot_offtimes(offtimes, ax=axs[0, 1])
@@ -2050,7 +2144,7 @@ def hist_and_cumulative(data, ax=None, log=False):
     if log:
         bins = np.logspace(np.log10(data.min()), np.log10(data.max()), 64)
     else:
-        bins = np.logspace(data.min(), data.max(), 64)
+        bins = np.linspace(data.min(), data.max(), 64)
     ax.hist(data, bins=bins, density=True, log=False, histtype="step")
     ax.set_ylabel("PDF")
     if log:
@@ -2085,7 +2179,7 @@ def calc_onframes(df):
     on_idx[0] = True
     on_frames = trace[on_idx]
 
-    return pd.DataFrame(data=np.stack((on_frames, np.arange(len(on_frames)) + 1)).T, columns=["frame", "occurence"])
+    return pd.DataFrame(data=np.stack((on_frames, np.arange(len(on_frames)) + 1)).T, columns=["frame", "occurrence"])
 
 """
 # build tree for use later
