@@ -311,6 +311,9 @@ class RawImages(object):
             name="Timestamp"
         )
 
+        if not self.date_idx.is_monotonic:
+            logger.warn("Raw data's time index isn't monotonic")
+
         assert len(self.date_idx) == len(self.raw), "Date index and Raw data don't match, {}, {}".format(self.date_idx, self.raw)
 
     def __repr__(self):
@@ -559,10 +562,20 @@ class PALMData(object):
 
         return cls(shape, processed=processed, grouped=grouped)
 
-    def drift_correct(self, sz=25, **kwargs):
+    def drift_correct(self, sz=25, all_frames=True, **kwargs):
+        """Run automatic drift correction algorithm, see pyPALM.drift.remove_all_drift for details
+
+        sz is the sigma z cutoff
+
+        all_frames indicates whether you want the frames initialized or not."""
+        if all_frames:
+            frames_index = pd.RangeIndex(self.processed.frame.min(), self.processed.frame.max() + 1, name="frame")
+        else:
+            frames_index = None
+
         _, self.drift, _, self.drift_fiducials = remove_all_drift(
             self.processed[self.processed.sigma_z < sz],
-            self.shape, None, None,
+            self.shape, None, frames_index,
             **kwargs
         )
         self.drift_corrected = remove_drift(self.processed, self.drift)
@@ -578,9 +591,15 @@ class PALMData(object):
         logger.info("Grouping gap is being set to {}".format(mygap))
         self.grouped = slab_grouper([self.drift_corrected], radius=r, gap=mygap, zscaling=zscaling * 130, numthreads=48)[0]
 
+    def find_fiducials(self, data="drift_corrected", **kwargs):
+        """"""
+        data = getattr(self, data)
+        self.fiducials = find_fiducials(data, self.shape, **kwargs)
+        return self.fiducials
+
     @cached_property
     def fiducials(self):
-        return find_fiducials(self.drift_corrected, self.shape, diagnostics=True)
+        return self.find_fiducials("drift_corrected", diagnostics=True)
 
     def remove_fiducials(self, radius):
         """remove fiducials from data"""
@@ -591,6 +610,7 @@ class PALMData(object):
                 continue
             df_nf = filter_fiducials(df, self.fiducials, radius)
             setattr(self, df_title + "_nf", df_nf)
+        self.make_fiducial_mask(radius)
 
     @classmethod
     def load(cls, fname):
@@ -787,7 +807,7 @@ class PALMData(object):
 class Data405(object):
     """An object encapsulating function's related to reactivation data"""
     try:
-        calibration = pd.read_excel("../Aggregated 405 Calibration.xlsx")
+        calibration = pd.read_excel("//dm11/hesslab/Cryo_data/Data Processing Notebooks/Aggregated 405 Calibration.xlsx")
         from scipy.interpolate import interp1d
         calibrate = interp1d(calibration["voltage"], calibration["mean"])
         calibrated = True
@@ -835,7 +855,7 @@ class Data405(object):
         data_df = self.data
 
         # make sure we're in range
-        upper_limit = min(upper_limit, data_df.reactivation.max())
+        upper_limit = min(upper_limit, data_df.reactivation.max() * 0.999)
 
         # clip data, dropping previous fit column if it exists
         data_df.drop("fit", axis=1, inplace=True, errors='ignore')
@@ -981,7 +1001,7 @@ class PALMExperiment(object):
         def shift_and_mask(chunk, chunked_shifts):
             """Drift correct raw data (based on PALM drift correction), mask and aggregate"""
             # calculate chunked mask
-            assert len(chunk) == len(chunked_shifts), "Lengths don't match"
+            assert len(chunk) == len(chunked_shifts), "Lengths don't match, {} != {}".format(chunk, chunked_shifts)
 
             # convert image data to float
             chunk = chunk.astype(float)
@@ -1004,8 +1024,8 @@ class PALMExperiment(object):
             # return aggregated data along frame axis
             return np.asarray(agg_func(shifted_masked_array, (1, 2)))
 
-        # get x, y shifts from palm drift
-        shifts = self.palm.drift[["y0", "x0"]].values
+        # get x, y shifts from palm drift, interpolating missing values
+        shifts = self.palm.drift[["y0", "x0"]].reindex(pd.RangeIndex(len(self.raw))).interpolate("slinear", fill_value="extrapolate", limit_direction="both").values
 
         # set up computation tree
         to_compute = [
@@ -1071,7 +1091,7 @@ class PALMExperiment(object):
         ax.set_title(title)
         return fig, ax
 
-    @cached_property
+    @property
     def frame(self):
         """Make a groupby object that is by frame"""
         return self.palm.drift_corrected_nf.groupby("frame")
@@ -1081,6 +1101,7 @@ class PALMExperiment(object):
         """mean number of photons per frame per localization excluding fiducials"""
         nphotons = self.frame.nphotons.mean().reindex(pd.RangeIndex(len(self.raw)))
         nphotons.index = self.time_idx
+        nphotons = nphotons.sort_index()
         return nphotons
 
     @cached_property
@@ -1088,12 +1109,14 @@ class PALMExperiment(object):
         """Number of localizations per frame, excluding fiducials"""
         counts = self.frame.size().reindex(pd.RangeIndex(len(self.raw)))
         counts.index = self.time_idx
+        counts = counts.sort_index()
         return counts
 
     @cached_property
     def intensity(self):
         """Median intensity within masked (data) area, in # of photons"""
-        return pd.Series(data=self.cached_data.masked_data_median - 100, index=self.time_idx)
+        intensity = self.cached_data.masked_data_median - 100
+        return intensity.sort_index()
 
     @cached_property
     def contrast_ratio(self):
@@ -1123,7 +1146,7 @@ class PALMExperiment(object):
 
         return fig, axs
 
-    def plot_all(self, fit_start=None, components=3, **kwargs):
+    def plot_all(self, fit_start=None, components=2, **kwargs):
         """Plot entire experiment"""
 
         # make the figure
@@ -1152,7 +1175,7 @@ class PALMExperiment(object):
     def _fit_and_add_to_plot(self, ax, fit_start, components):
         # pull data to fit
         fit_data = self.counts.loc[fit_start:0].dropna()
-        # make index
+        # make index, start from 0
         xdata = (fit_data.index - fit_data.index.min()).values
         # fit the data
         popt, pcov = multi_exp_fit(fit_data.values, xdata, components, method="mle")
@@ -1163,7 +1186,7 @@ class PALMExperiment(object):
         # add the fit line and legend
         ax.plot(fit_data.index, multi_exp(xdata, *popt), label=label_base.format(*popt), ls="--")
 
-    def plot_nofeedback(self, fit_start=None, components=3):
+    def plot_nofeedback(self, fit_start=None, components=2):
         """Plot many statistics for a PALM photophysics expt"""
 
         # end at 0 time
