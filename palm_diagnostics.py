@@ -659,8 +659,8 @@ class PALMData(object):
 
             ax0.matshow(cimg, norm=PowerNorm(0.5), cmap="Greys_r")
             ax0.set_title("Data")
-            ax1.matshow(cimg, norm=PowerNorm(0.5), vmin=thresh, cmap=greys_limit)
-            ax0.set_title("Data and Thresholds")
+            ax1.matshow(cimg, vmin=thresh, cmap=greys_limit)
+            ax1.set_title("Data and Thresholds")
         return thresh
 
     def make_fiducial_mask(self, radius):
@@ -802,6 +802,34 @@ class PALMData(object):
             new_params[param] = df
 
         return self.__class__(**new_params)
+
+    def spatial_filter(self, bin_size=2, low=True):
+        """Spatially filter PALM data
+
+        1. Bin grouped data spatially
+        2. use spatially binned data to determine a threshold that descriminates between biology and background
+        3. Apply that filter to keep biology OR background in ungrouped data
+        """
+
+        # step 1 and 2
+        thresh = self.threshold("grouped_nf")
+        cuts_grouped = [pd.cut(self.grouped_nf[c + "0"], np.arange(0, s + bin_size, bin_size)) for c, s in zip("yx", self.shape)]
+        filt = self.grouped_nf.groupby(cuts_grouped).size() < thresh
+
+        if not low:
+            filt = ~filt
+
+        def filt_func(df):
+            """utility function for filtering dataframe"""
+            try:
+                return filt[df.name]
+            except KeyError as e:
+                return False
+        # step 3
+        cuts = [pd.cut(self.drift_corrected_nf[c + "0"], np.arange(0, s + bin_size, bin_size)) for c, s in zip("yx", self.shape)]
+        filtered_palm = self.drift_corrected_nf.groupby(cuts).filter(filt_func)
+
+        return filtered_palm
 
 
 class Data405(object):
@@ -977,12 +1005,19 @@ class PALMExperiment(object):
         self.activation.save(fname)
         self.cached_data.to_hdf(fname, "cached_data")
 
-    def masked_agg(self, masktype, agg_func=np.median):
+    def masked_agg(self, masktype, agg_func=np.median, agg_args=(), agg_kwargs={}, prefilter=False):
         """Mask and aggregate raw data along frame direction with agg_func
 
         Save results on RawImages object"""
         # make sure our agg_func works with masked arrays
-        agg_func = getattr(np.ma, agg_func.__name__)
+        try:
+            agg_func2 = getattr(np.ma, agg_func.__name__)
+        except AttributeError:
+            logger.info("{} not found".format(agg_func))
+
+            def agg_func2(masked_array, *args, **kwargs):
+                array = np.ma.filled(masked_array, np.nan)
+                return agg_func(array, *args, **kwargs)
 
         # we have to reverse the mask for how np.ma.masked_array works
         if masktype.lower() == "data":
@@ -1004,6 +1039,9 @@ class PALMExperiment(object):
             assert len(chunk) == len(chunked_shifts), "Lengths don't match, {} != {}".format(chunk, chunked_shifts)
 
             # convert image data to float
+            if prefilter:
+                # median filter spatially, not temporally
+                chunk = ndi.median_filter(chunk, (1, 3, 3))
             chunk = chunk.astype(float)
 
             # drift correct the chunk
@@ -1022,7 +1060,7 @@ class PALMExperiment(object):
             shifted_masked_array = np.ma.masked_array(shifted_chunk, extended_mask)
 
             # return aggregated data along frame axis
-            return np.asarray(agg_func(shifted_masked_array, (1, 2)))
+            return np.asarray(agg_func2(shifted_masked_array, *agg_args, axis=(1, 2), **agg_kwargs))
 
         # get x, y shifts from palm drift, interpolating missing values
         shifts = self.palm.drift[["y0", "x0"]].reindex(pd.RangeIndex(len(self.raw))).interpolate("slinear", fill_value="extrapolate", limit_direction="both").values
@@ -1038,10 +1076,38 @@ class PALMExperiment(object):
 
         # save these attributes on the RawImages Object
         attrname = "masked_" + masktype.lower() + "_" + agg_func.__name__
+        if prefilter:
+            attrname = attrname + "_prefilter"
         logger.info("Setting {}".format(attrname))
         self.cached_data[attrname] = masked_result
 
         return masked_result
+
+    def calc_all_masked_aggs(self, fname=None):
+        """Convenience function to calculate and save the usual masked aggregations."""
+        if fname is not None:
+            """update store"""
+            def save():
+                self.cached_data.to_hdf(fname, "cached_data")
+        else:
+            def save():
+                pass
+
+        # calculate things and save if requested.
+        self.masked_agg("data")
+        save()
+        self.masked_agg("data", np.max)
+        save()
+        self.masked_agg("data", np.max, prefilter=True)
+        save()
+        self.masked_agg("data", np.nanpercentile, agg_args=(99,))
+        save()
+        self.masked_agg("data", np.nanpercentile, agg_args=(99,), prefilter=True)
+        save()
+        self.masked_agg("fiducials")
+        save()
+        self.masked_agg("background")
+        save()
 
     def agg(self, agg_func=np.median):
         """Aggregate raw data along frame direction with agg_func"""
@@ -1231,6 +1297,68 @@ class PALMExperiment(object):
             df.plot(ax=ax, label="Raw data")
             df.rolling(1000, 0, center=True).mean().plot(ax=ax, label="Rolling mean (1000)")
             ax.set_ylabel(title)
+
+        return fig, axs
+
+    def plot_contrast(self, s=slice(None), background=True):
+        """Plot the various ways of calculating the contrast ratio"""
+        # data to use
+        titles = {
+            "contrast": "Average # Photons / Masked Median",
+            "masked_data_amax": "Masked Max / Masked Median",
+            "masked_data_amax_prefilter": "Filtered Masked Max / Masked Median",
+            "masked_data_nanpercentile": "Masked 99% / Masked Median",
+            "masked_data_nanpercentile_prefilter": "Filtered Masked 99% / Masked Median"
+        }
+        
+        if background:
+            bg = self.cached_data.masked_background_median
+        else:
+            bg = 100.0
+        # make sure intensity doesn't go below 1
+        intensity = np.fmax(self.cached_data.masked_data_median - bg, 1)
+
+        assert np.array_equal(self.cached_data.index, intensity.index)
+        
+        # build data
+        data_dict = {}
+        for p in titles:
+            try:
+                # pin numerator to positive
+                data_dict[p] = np.fmax((self.cached_data[p] - bg), 0) / intensity
+            except KeyError:
+                logger.info("Couldn't find {}".format(p))
+                continue
+
+        data_dict["contrast"] = self.nphotons / intensity
+
+        # setup plot
+        num_d = len(data_dict)
+        fig, axs = plt.subplots(num_d, 2, sharex="col", sharey="row", gridspec_kw=dict(width_ratios=(3, 1)), figsize=(5, 2 * num_d))
+
+        # make plot
+        for (ax_plot, ax_hist), (p, contrast) in zip(axs, sorted(data_dict.items())):
+            # trim data
+            contrast = contrast.loc[s]
+
+            # calculate rolling mean
+            roll = contrast.rolling(250, 0, True).mean()
+
+            # plot
+            for d, label in zip((contrast, roll), ("Data", "Rolling Mean, 250 Frames")):
+                d.plot(ax=ax_plot, label=label)
+                d.hist(bins=128, ax=ax_hist, orientation='horizontal', histtype="stepfilled", density=True)
+
+            med = contrast.median()
+
+            # add anotation
+            for ax in (ax_plot, ax_hist):
+                ax.axhline(med, c="r", ls=":", label="Median {:.1f}".format(med))
+
+            ax_plot.set_title(titles[p])
+            ax_plot.legend()
+
+        fig.tight_layout()
 
         return fig, axs
 
