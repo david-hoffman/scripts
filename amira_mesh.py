@@ -16,7 +16,7 @@ header = """# AmiraMesh BINARY-LITTLE-ENDIAN 2.1
 
 # number of points in the file
 define Points {num_points:d}
-# number of label_labels ... ?
+# number of labels
 define LABEL_Labels {num_labels:d}
 
 Parameters {{
@@ -28,18 +28,18 @@ Parameters {{
 
 # Points have 3 coordinates, store as var 1
 Points {{ float[3] Coordinates }} @1
-# one id
+# one id column
 Points {{ int Ids }} @2
-# data columns
+# extra data columns
 {columns:s}
-# three labels
+# labels
 {labels:s}
 
 # Data section follows
 # Points {{ float[3] Coordinates }} @1, no delimiter, know it's in groups of three from header
 """
 
-column_base = "Points {{ float Data }} @{:d}"
+column_base = "Points {{ {} {} }} @{:d}"
 label_base = "LABEL_Labels {{ byte strings }} @{:d}"
 
 
@@ -48,17 +48,21 @@ def _normalize_str(s):
     return s
 
 
-def write_and_pack(num, data, file):
+def pack_column(data, num, name):
     """Take data, make sure it's flat, write to file with var identifier"""
     assert data.ndim == 1, "data wrong shape"
     # < signifies little endian
     if np.issubdtype(data.dtype, np.inexact):
         data = data.astype(np.float32)
+        t = "float"
     if np.issubdtype(data.dtype, np.integer):
         data = data.astype(np.int32)
+        t = "int"
     packed = data.tobytes()
     var = "\n@{}\n".format(num)
-    file.writelines([var.encode(), packed])
+    data_str = [var.encode(), packed]
+    column_name = column_base.format(t, name, num)
+    return column_name, data_str
 
 
 def export_mesh(fname, dataframe, xyz_col=["x0", "y0", "z0"], label_cols=[], id_col=[]):
@@ -73,39 +77,54 @@ def export_mesh(fname, dataframe, xyz_col=["x0", "y0", "z0"], label_cols=[], id_
         num_points=len(dataframe),
         num_labels=len(label_cols),
         # normalize symbols
-        symbols="\n,".join(["C{:03d} ".format(i) + _normalize_str(s) for i, s in enumerate(data_col)])
+        symbols=",\n            ".join(['C{:03d} "{}"'.format(i, _normalize_str(s)) for i, s in enumerate(data_col)])
     )
 
     start_of_data = 3
     end_of_data = start_of_labels = start_of_data + len(data_col)
-    format_dict["columns"] = "\n".join([column_base.format(i) for i in range(start_of_data, end_of_data)])
+    columns = []
+    data_packed = []
+
+    for i, name in enumerate(data_col):
+        d = dataframe[name].values
+        c, d_packed = pack_column(d, start_of_data + i, name)
+        columns.append(c)
+        data_packed += d_packed
+
+    format_dict["columns"] = "\n".join(columns)
 
     end_of_labels = end_of_data + format_dict["num_labels"]
-    format_dict["labels"] = "\n".join([label_base.format(i) for i in range(start_of_labels, end_of_labels)])
+    labels = []
+    labels_packed = []
+
+    for i, name in enumerate(label_cols):
+        raise NotImplementedError("Labels aren't implemented")
+        # l = dataframe[name].values
+        # l_name, l_packed = pack(d, start_of_labels + i, name)
+        # labels.append(l_name)
+        # labels_packed += l_packed
+
+    format_dict["labels"] = "\n".join(labels_packed)
 
     with open(fname, "w") as file:
+        # write header
         file.write(header.format(**format_dict))
 
+    # write data
+    xyz = dataframe[xyz_col].values.ravel()
+    _, packed_xyz = pack_column(xyz, 1, "")
+
+    # write index
+    if len(id_col):
+        idx = dataframe[id_col]
+    else:
+        idx = dataframe.index.values
+    _, packed_idx = pack_column(idx, 2, "")
+
+    data_packed = packed_xyz + packed_idx + data_packed
+
     with open(fname, "ab") as file:
-        # convert header to bytes and write to file
-        # write data
-        xyz = dataframe[xyz_col].values.ravel()
-        write_and_pack(1, xyz, file)
-
-        # write index
-        if len(id_col):
-            idx = dataframe[id_col]
-        else:
-            idx = dataframe.index.values
-        write_and_pack(2, idx, file)
-
-        for i, name in enumerate(data_col):
-            d = dataframe[name].values
-            write_and_pack(start_of_data + i, d, file)
-
-        for i, name in enumerate(label_cols):
-            d = dataframe[name].values
-            write_and_pack(start_of_labels + i, d, file)
+        file.writelines(data_packed)
 
     return fname
 
@@ -115,7 +134,8 @@ if __name__ == "__main__":
 
     np.random.seed(12345)
 
-    test_data = pd.DataFrame(np.random.rand(100, 4), columns=["x0", "y0", "z0", "col1"])
+    test_data = pd.DataFrame(np.random.randn(1000, 5), columns=["x0", "y0", "z0", "col1", "col2"])
+    test_data["int_col"] = np.random.randint(1000, size=1000)
 
     # label columns still don't work
     # s = [s for s in string.ascii_letters + string.digits]
