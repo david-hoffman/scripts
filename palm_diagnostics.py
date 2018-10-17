@@ -216,7 +216,12 @@ def lazy_imread(path):
     with warnings.catch_warnings():
         # ignore warnings
         warnings.simplefilter("ignore")
-        return tif.imread(path)
+        try:
+            return tif.imread(path)
+        except Exception as e:
+            # if I die which path is the isssue?
+            e.args = (e.args[0] + " path = " + path,) + e.args[1:]
+            raise e
 
 
 def _get_tif_info(path):

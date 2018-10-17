@@ -140,7 +140,7 @@ def bleach_plot2(k, v, bg=100.0, num_tiles=16, gamma=0.5, dt=1):
     # normalize all the kinetics with the max one
     norm_kinetics = kinetics / np.max(kinetics[:, np.newaxis], -1)
     kin_img = np.ones_like(img_split)[:, 0, ...] * norm_kinetics[:, -1, np.newaxis, np.newaxis]
-    ### start plotting
+    # start plotting
     # plot kinetics, color by amount of bleaching and set alpha to initial intensity
     for trace, cpoint in zip(norm_kinetics, scale(norm_kinetics[:, -1])):
         # make sure the point is not an nan
@@ -168,6 +168,7 @@ def bleach_plot2(k, v, bg=100.0, num_tiles=16, gamma=0.5, dt=1):
     ax_k.set_title("Bleaching Map")
     fig.tight_layout()
     return fig, axs
+
 
 def gen_wavelength(center_wl, start_p=0, end_p=2048, center_p=1024, pix_size=0.0065, grating_pitch=300.0):
     """Generate a wavelength axis for spectroscopic data
