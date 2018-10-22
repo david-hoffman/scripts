@@ -46,6 +46,7 @@ from pyPALM.render import gen_img, save_img_3d, tif_convert
 
 from scipy.spatial import cKDTree
 from scipy.stats import poisson
+from scipy.special import gamma, zeta, gammainc, gammaincc
 
 # override any earlier imports
 from dphutils.lm import curve_fit
@@ -154,6 +155,8 @@ class cached_property(object):
         property.
 
         Source: https://github.com/bottlepy/bottle/commit/fa7733e075da0d790d809aa3d2f53071897e6f76
+        
+        This will be part of the standard library starting in 3.8
         """
 
     def __init__(self, func):
@@ -953,10 +956,6 @@ def weird(xdata, *args):
     return res
 
 
-def stretched_exp(xdata, a, b):
-    return a * np.exp(-xdata ** b)
-
-
 class PALMExperiment(object):
     """A simple class to organize our experimental data"""
 
@@ -983,6 +982,9 @@ class PALMExperiment(object):
         else:
             self.cached_data = cached_data
             self.cached_data.index = self.time_idx
+
+        self.output = dict()
+        # active_pixel_density=palm.data_mask.sum() / palm.data_mask.size
 
     def __repr__(self):
         """A representation of this class"""
@@ -1169,11 +1171,19 @@ class PALMExperiment(object):
 
     @cached_property
     def nphotons(self):
-        """mean number of photons per frame per localization excluding fiducials"""
-        nphotons = self.frame.nphotons.mean().reindex(pd.RangeIndex(len(self.raw)))
+        """median number of photons per frame per localization excluding fiducials"""
+        nphotons = self.frame.nphotons.median().reindex(pd.RangeIndex(len(self.raw)))
         nphotons.index = self.time_idx
         nphotons = nphotons.sort_index()
         return nphotons
+
+    @cached_property
+    def amp(self):
+        """median amplitude per frame per localization excluding fiducials"""
+        amp = self.frame.amp.median().reindex(pd.RangeIndex(len(self.raw)))
+        amp.index = self.time_idx
+        amp = amp.sort_index()
+        return amp
 
     @cached_property
     def counts(self):
@@ -1184,9 +1194,19 @@ class PALMExperiment(object):
         return counts
 
     @cached_property
+    def grouped_counts(self):
+        """Number of localizations per frame, excluding fiducials"""
+        counts = self.palm.grouped_nf.groupby("frame").size().reindex(pd.RangeIndex(len(self.raw)))
+        counts.index = self.time_idx
+        counts = counts.sort_index()
+        return counts
+
+    @cached_property
     def intensity(self):
         """Median intensity within masked (data) area, in # of photons"""
-        intensity = self.cached_data.masked_data_median - 100
+        # make sure intensity doesn't go to 0, doesn't make physical sense and would cause
+        # contrast ratio to explode.
+        intensity = np.fmax(self.cached_data.masked_data_median - self.cached_data.masked_background_median, 1)
         return intensity.sort_index()
 
     @cached_property
@@ -1209,6 +1229,9 @@ class PALMExperiment(object):
         # add activation plot
         self.activation.plot(ax=axs[-1], limits=False, **kwargs)
 
+        # save fits for later
+        self.output["popt_react"] = self.activation.popt
+        self.output["pcov_react"] = self.activation.pcov
         # set figure title
         axs[0].set_title("Feedback Only")
         axs[0].legend()
@@ -1228,6 +1251,10 @@ class PALMExperiment(object):
 
         # add activation plot
         self.activation.plot(ax=axs[-1], limits=False, **kwargs)
+
+        # save fits for later
+        self.output["popt_react"] = self.activation.popt
+        self.output["pcov_react"] = self.activation.pcov
 
         # add line for t = 0
         for ax in axs:
@@ -1249,7 +1276,11 @@ class PALMExperiment(object):
         # make index, start from 0
         xdata = (fit_data.index - fit_data.index.min()).values
         # fit the data
-        popt, pcov = multi_exp_fit(fit_data.values, xdata, components, method="mle")
+        popt, pcov = multi_exp_fit(fit_data.values, xdata, components, offset=True, method="mle")
+
+        # save for later analysis.
+        self.output["popt_decay"] = popt
+        self.output["pcov_decay"] = pcov
 
         # make the label
         label_base = "$y(t) = " + "{:+.3g} e^{{-{:.2g}t}}" * (len(popt) // 2) + " {:+.2g}$" * (len(popt) % 2)
@@ -1300,8 +1331,39 @@ class PALMExperiment(object):
                 df = df[~self.raw.first_frames]
             df = df.loc[s]
             df.plot(ax=ax, label="Raw data")
-            df.rolling(1000, 0, center=True).mean().plot(ax=ax, label="Rolling mean (1000)")
+            df.rolling(1000, 0, center=True).median().plot(ax=ax, label="Rolling mean (1000)")
             ax.set_ylabel(title)
+
+        ax_contrast = axs[2]
+
+        # remove legends
+        for l in ax_contrast.lines:
+            l.set_label("_")
+
+        # add anotation
+        if s.start is None:
+            med_pre = self.contrast_ratio.loc[:0].median()
+            ax_contrast.hlines(med_pre, self.contrast_ratio.index.min(), 0, "C2", lw=2,
+                               label="Pre-activation {:.1f}".format(med_pre), zorder=3)
+        if s.stop is None:
+            med_post = self.contrast_ratio.loc[0:].median()
+            ax_contrast.hlines(med_post, 0, self.contrast_ratio.index.max(), "C3", lw=2,
+                               label="Post-activation {:.1f}".format(med_post), zorder=3)
+
+            ax_counts = axs[1]
+            # remove legends
+            for l in ax_counts.lines:
+                l.set_label("_")
+
+            # calculate set point, and store for later retrival.
+            set_point = self.set_point = self.counts.loc[0:].median()
+            # save set_point for later
+            self.output["set_point"] = set_point
+            ax_counts.hlines(set_point, 0, self.counts.index.max(), "C2", lw=2,
+                             label="Set Point {:}".format(set_point), zorder=3)
+            ax_counts.legend()
+
+        ax_contrast.legend()
 
         return fig, axs
 
@@ -1309,22 +1371,25 @@ class PALMExperiment(object):
         """Plot the various ways of calculating the contrast ratio"""
         # data to use
         titles = {
-            "contrast": "Average # Photons / Masked Median",
+            "contrast": "Median # Photons / Masked Median",
+            "contrast2": "Median Amplitude / Masked Median",
             "masked_data_amax": "Masked Max / Masked Median",
             "masked_data_amax_prefilter": "Filtered Masked Max / Masked Median",
             "masked_data_nanpercentile": "Masked 99% / Masked Median",
             "masked_data_nanpercentile_prefilter": "Filtered Masked 99% / Masked Median"
         }
-        
+
         if background:
             bg = self.cached_data.masked_background_median
         else:
             bg = 100.0
-        # make sure intensity doesn't go below 1
+        # make sure intensity doesn't go below 1, if intensity were zero then
+        # contrast ratio would be infinite and it would be very hard to tell
+        # the differences between fluorophores.
         intensity = np.fmax(self.cached_data.masked_data_median - bg, 1)
 
         assert np.array_equal(self.cached_data.index, intensity.index)
-        
+
         # build data
         data_dict = {}
         for p in titles:
@@ -1332,33 +1397,50 @@ class PALMExperiment(object):
                 # pin numerator to positive
                 data_dict[p] = np.fmax((self.cached_data[p] - bg), 0) / intensity
             except KeyError:
-                logger.info("Couldn't find {}".format(p))
+                if "contrast" not in p:
+                    logger.info("Couldn't find {}".format(p))
                 continue
 
         data_dict["contrast"] = self.nphotons / intensity
+        data_dict["contrast2"] = self.amp / intensity
 
         # setup plot
         num_d = len(data_dict)
-        fig, axs = plt.subplots(num_d, 2, sharex="col", sharey="row", gridspec_kw=dict(width_ratios=(3, 1)), figsize=(5, 2 * num_d))
+        fig, axs = plt.subplots(num_d, 2, sharex="col", sharey="row", gridspec_kw=dict(width_ratios=(3, 1)), figsize=(6, 3 * num_d))
 
         # make plot
+        shared_hist = axs[0, 1].get_shared_x_axes()
         for (ax_plot, ax_hist), (p, contrast) in zip(axs, sorted(data_dict.items())):
             # trim data
             contrast = contrast.loc[s]
+            # turn off sharing on the histograms
+            shared_hist.remove(ax_hist)
+            # turn off x ticking on histograms
+            ax_hist.xaxis.set_major_locator(plt.NullLocator())
+            ax_hist.xaxis.set_minor_locator(plt.NullLocator())
 
             # calculate rolling mean
-            roll = contrast.rolling(250, 0, True).mean()
+            roll = contrast.rolling(1000, 0, True).median()
 
             # plot
-            for d, label in zip((contrast, roll), ("Data", "Rolling Mean, 250 Frames")):
-                d.plot(ax=ax_plot, label=label)
+            for d, label in zip((contrast, roll), ("Data", "Rolling Mean, 1000 Frames")):
+                d.plot(ax=ax_plot, label=label, zorder=2)
                 d.hist(bins=128, ax=ax_hist, orientation='horizontal', histtype="stepfilled", density=True)
 
-            med = contrast.median()
+            med_pre = contrast.loc[:0].median()
+            med_post = contrast.loc[0:].median()
+
+            # save contrast data for further analysis
+            self.output[p] = {"pre": med_pre, "post": med_post}
 
             # add anotation
-            for ax in (ax_plot, ax_hist):
-                ax.axhline(med, c="r", ls=":", label="Median {:.1f}".format(med))
+            ax_plot.hlines(med_pre, contrast.index.min(), 0, "C2", lw=2,
+                           label="Pre-activation {:.1f}".format(med_pre), zorder=3)
+            ax_plot.hlines(med_post, 0, contrast.index.max(), "C3", lw=2,
+                           label="Post-activation {:.1f}".format(med_post), zorder=3)
+
+            ax_hist.axhline(med_pre, color="C2", linewidth=2)
+            ax_hist.axhline(med_post, color="C3", linewidth=2)
 
             ax_plot.set_title(titles[p])
             ax_plot.legend()
@@ -1366,6 +1448,66 @@ class PALMExperiment(object):
         fig.tight_layout()
 
         return fig, axs
+
+    def calc_density(self, diagnostics=False):
+        """Estimate molecular density from decay of grouped counts"""
+        # calculate cumulative counts prior to activation
+        pre_counts = self.grouped_counts.loc[:0].cumsum()
+        # reset min for fitting.
+        pre_counts.index -= pre_counts.index.min()
+
+        try:
+            # try fitting to triple exponential (3 was found heuristically)
+            popt, pcov = multi_exp_fit(pre_counts.values, pre_counts.index.values, 3)
+        except RuntimeError:
+            logger.warning("Couldn't estimate density_asymptote")
+            popt = [np.nan]
+
+        # make simple plot if requested
+        if diagnostics:
+            fig, ax = plt.subplots()
+            pre_counts.plot(ax=ax, label="Data")
+            if len(popt) > 1:
+                ax.plot(pre_counts.index, multi_exp(pre_counts.index, *popt), label="Fit")
+                ax.axhline(popt[-1], color="C2", label="Density = {:g}".format(popt[-1]))
+                ax.legend()
+
+        # save densities as object attributes.
+        self.output["density"] = pre_counts.iloc[-1]
+        self.output["density_asymptote"] = popt[-1]
+
+        self.output["active_pixel_density"] = self.palm.data_mask.sum() / self.palm.data_mask.size
+
+    def output_to_series(self):
+        """Convert the internal output variable to a nicely formated series"""
+        output = self.output
+        s = pd.Series()
+        s["A"], s["ka"], s["B"], s["kb"], s["offset"] = output["popt_decay"]
+        s["taua"], s["taub"] = 1 / s.ka, 1 / s.kb
+
+        s["tau_react"] = 1 / output["popt_react"][1]
+
+        s["kDB"] = (s.B * s.ka + s.A * s.kb) / (s.A + s.B)
+        s["kBK"] = s.ka * s.kb / s.kDB
+        s["kBD"] = (s.A * s.B * (s.ka - s.kb)**2) / ((s.A + s.B) * (s.B * s.ka + s.A * s.kb))
+
+        s["tauDB"], s["tauBK"], s["tauBD"] = s.kDB, s.kBK, s.kBD
+
+        for k in ("set_point", "density", "density_asymptote", "active_pixel_density"):
+            s[k] = output[k]
+
+        keys = (
+            'contrast',
+            'contrast2',
+            'masked_data_amax',
+            'masked_data_amax_prefilter',
+            'masked_data_nanpercentile',
+            'masked_data_nanpercentile_prefilter'
+        )
+        for k in keys:
+            for kk in ("pre", "post"):
+                s["{}_{}".format(k, kk)] = output[k][kk]
+        return s
 
 
 def add_line(ax, data, func=np.mean, fmt_str=":.0f", **kwargs):
@@ -1680,13 +1822,13 @@ def fit_and_plot_power_law(trace, ul, offset, xmax, ll=None, ax=None, density=Fa
     # plot on loglog plot
     ax.loglog(x, y, ".", label="Data")
     ax.loglog(x, ty, label=eqn.format(*popt[1:]))
-    ax.set_ylim(ymin=ymin)
+    ax.set_ylim(bottom=ymin)
 
     if ll:
         ax.axvline(ll, color="y", linewidth=4, alpha=0.5, label="$x_{{min}} = {}$".format(ll))
     if ul:
         ax.axvline(ul, color="y", linewidth=4, alpha=0.5, label="$x_{{max}} = {}$".format(ul))
-    
+
     # labeling
     if density:
         ax.set_ylabel("Frequency")
@@ -1699,13 +1841,141 @@ def fit_and_plot_power_law(trace, ul, offset, xmax, ll=None, ax=None, density=Fa
     return plt.gcf(), ax, popt, ul
 
 
+def stretched_exp(tdata, tau, beta):
+    """A streched exponential distribution"""
+    mean_tau = tau * gamma(1 + 1 / beta)
+    return np.exp(-(tdata / tau) ** beta) / mean_tau
+
+
+def power_law_cont(tdata, alpha, tmin=1):
+    """A continuous power law distribution"""
+    return ((alpha - 1) / tmin)(tdata / tmin) ** (-alpha)
+
+
+def stretched_exp_ccdf(tdata, tau, beta):
+    """Closed form cCDF for a stretched exponential distribution"""
+    return gammaincc(1.0 / beta, (tdata / tau) ** beta) / (beta * gamma(1. + 1. / beta))
+
+
+def power_law_cont_ccdf(tdata, alpha, tmin=1):
+    """Closed form cCDF for a power law distribution"""
+    # below is for discrete variables
+    # return zeta(alpha, tdata) / zeta(alpha, tmin)
+    return (tdata / tmin) ** (1 - alpha)
+
+
+def se_pl_ccdf(tdata, tau, beta, alpha, f, pre, tmin=1):
+    """the cCDF of a mixture of a stretched exponential and a power law distributions
+
+    f is the fraction of stretched exponential in the total distribution."""
+    ccdf_se = stretched_exp_ccdf(tdata, tau, beta)
+    ccdf_pl = power_law_cont_ccdf(tdata, alpha, tmin)
+    ccdf = ccdf_se * f + ccdf_pl * (1 - f)
+    return ccdf * pre
+
+
+def fit_and_plot_se_pl_ccdf(offtimes, density=True, ax=None):
+    """Personal communication from Muzhou Wang (Northwestern)
+
+    He fits the complementary cumulative distribution of offtimes to a mixture of
+    a stretched exponential and a power law
+
+    This function does the fit and makes the plot."""
+
+    if ax is None:
+        fig, ax = plt.subplots()
+    else:
+        fig = ax.get_figure()
+
+    # make the distribution of off times
+    y = np.bincount(offtimes)
+    # truncate the 0 bin (no data)
+    y = y[1:]
+    x = np.arange(len(y)) + 1
+
+    # make the experimental cumulative distribution function.
+    ccdf = y[::-1].cumsum()[::-1]
+    if density:
+        ccdf = ccdf / ccdf[0]
+
+    # make some reasonable starting guesses for the parameters
+    p0 = np.percentile(offtimes, 95), 1, 2, 0.5, ccdf[0]
+    try:
+        popt, pcov = curve_fit(se_pl_ccdf, x, ccdf, p0=p0,
+                               bounds=((0, 0, 0, 0, 0), (np.inf, np.inf, np.inf, 1, np.inf)))
+    except RuntimeError:
+        logger.warning("fit failed with starting variables = {}".format(p0))
+        popt = None
+
+    ax.loglog(x, ccdf, "C0.", label="Data")
+
+    # if fit is successful plot it, its components and summary in the legend
+    if popt is not None:
+        tau, beta, alpha, f, pre = popt
+        ax.loglog(x, se_pl_ccdf(x, *popt), "C1", label="Fit")
+
+        ccdf_se = stretched_exp_ccdf(x, tau, beta)
+        ccdf_pl = power_law_cont_ccdf(x, alpha, tmin=1)
+
+        ax.loglog(x, ccdf_pl * (1 - f) * pre, "C2--", label="{:.0%} Power Law: $\\alpha = {:.2f}$".format(1 - f, alpha))
+        ax.loglog(x, ccdf_se * f * pre, "C2:", label="{:.0%} Str. Exp.: $\\tau = {:}$, $\\beta = {:.2f}$".format(f, latex_format_e(tau), beta))
+
+        ax.legend()
+    ax.set_xlabel("# of Frames")
+    ax.set_ylabel("cCDF")
+    return fig, ax
+
+
+def plot_occurences(samples_blinks, num=10, ax=None):
+    """Make a plot of occurences as a function of number of frames.alpha
+
+    The 1 curve shows the fraction of molecules that have occured *only* once at that frame
+
+    the 2 cuve shows the fraction of molecules that have occured *only* twice by that frame.alpha
+
+    etc."""
+
+    # make axes if needed
+    if ax is None:
+        fig, ax = plt.subplots()
+    else:
+        fig = ax.get_figure()
+
+    # find on frames
+    all_onframes = pd.concat([calc_onframes(s) for s in tqdm.tqdm(samples_blinks, desc="Getting on frames")], ignore_index=True)
+    # calculate the number of occurences in each frame
+    frames_and_occurrences = all_onframes.groupby(["occurrence", "frame"]).size()
+
+    # reset the index to start at 1 for loglog plottings
+    frames_and_occurrences.index = frames_and_occurrences.index.set_levels(frames_and_occurrences.index.levels[1] - frames_and_occurrences.index.levels[1].min() + 1, level=1)
+    frames_and_occurrences /= frames_and_occurrences[1].sum()
+
+    for i in range(1, num + 1):
+        trace = frames_and_occurrences[i].sub(frames_and_occurrences[i + 1], fill_value=0).cumsum()
+        trace.plot(ax=ax, label=str(i))
+
+    ax.legend()
+    ax.set_ylabel("Fraction of Molecules Observed # of Times")
+
+    all_blinks = pd.concat(samples_blinks, ignore_index=True)
+    start_frame, end_frame = all_blinks.frame.min(), all_blinks.frame.max()
+
+    if start_frame > 1:
+        ax.set_xlabel("Frame # - ${}$".format(latex_format_e(start_frame)))
+    else:
+        ax.set_xlabel("Frame #")
+
+    return fig, ax
+
+
 def plot_blinks(gap, max_frame, onofftimes=None, samples_blinks=None, ax=None, min_sigma=0, coords="xyz", density=False):
     """Plot blinking events given on off times and fitted power law decay of off times"""
     if ax is None:
         fig, ax = plt.subplots(1)
-        
+
     # calculate the number of events for each purported molecule
     if samples_blinks is not None:
+        logger.debug("Correcting blinks")
         samples_blinks = dask.compute(samples_blinks)[0]
 
         grouped = [dask.delayed(fast_group)(s, gap) for s in samples_blinks]
@@ -1715,11 +1985,12 @@ def plot_blinks(gap, max_frame, onofftimes=None, samples_blinks=None, ax=None, m
         blinks = np.concatenate(regroup.compute(scheduler="processes"))
         prefix = "Corrected\n"
     elif onofftimes is not None:
+        logger.debug("Not correcting blinks")
         blinks = np.array([count_blinks(s, gap) for s in onofftimes])
         prefix = "Uncorrected\n"
     else:
         raise RuntimeError
-        
+
     blinks = blinks.astype(int)
 
     # Fit to zero-truncated poisson
@@ -1759,7 +2030,7 @@ def plot_blinks(gap, max_frame, onofftimes=None, samples_blinks=None, ax=None, m
 
     ax.step(x, y, label=label, where="mid")
     ax.legend()
-    ax.set_xlim(xmin=0, xmax=30)
+    ax.set_xlim(left=0, right=30)
     ax.set_xlabel("# of events / molecule")
     ax.set_title("Long Term Blinking")
 
@@ -2220,12 +2491,12 @@ def get_onofftimes(samples, extract_radius, data=None, extract_fiducials=None, p
 
     # extract samples
     n = len(samples)
-    print("Extracting {} samples ...".format(n))
+    logging.info("Extracting {} samples ...".format(n))
     samples_blinks = extract_fiducials(samples[["y0", "x0"]].values, extract_radius)
-    print("Kept samples = {}%".format(int(len(samples_blinks) / n * 100)))
+    logging.info("Kept samples = {}%".format(int(len(samples_blinks) / n * 100)))
 
     # calculate on/off times
-    print("Calculating on and off times ... ")
+    logging.info("Calculating on and off times ... ")
     onofftimes = dask.delayed([dask.delayed(on_off_times_fast)(y) for y in samples_blinks]).compute()
 
     return onofftimes, samples_blinks
@@ -2236,25 +2507,32 @@ def plot_onofftimes(onofftimes, max_frame, axs=None):
     # now compute on and offtimes
     ontimes, offtimes = get_on_and_off_times(onofftimes)
 
+    # make figure if none is provided
     if axs is None:
         fig, axs = plt.subplots(2, 2, figsize=(10, 10))
     else:
         fig = axs.ravel()[0].get_figure()
 
+    # add plots
     _, _, power = fit_plot_ontimes(ontimes, ax=axs[0, 0])
     _, _, popt = fit_plot_offtimes(offtimes, ax=axs[0, 1])
 
+    # add legends
     for ax in axs[0]:
         ax.legend()
+
+    # add cutoffs
     # 1e-2, 1e-4, 1e-6
     my_cutoffs = cutoffs(offtimes, (0.99, 0.999, 0.9999))
     for gap, cp in zip(*my_cutoffs):
         line = mlines.Line2D([gap, gap, 0], [0, cp, cp], color="r")
-        ax.add_line(line)
+        axs[0, 1].add_line(line)
         plot_blinks(gap, max_frame, onofftimes, density=True, ax=axs[1, 1])
 
+    # calculate ratios
     _, ratio = calc_onoff_ratio(onofftimes)
 
+    # add ratios to the plot with legend
     ax = axs[1, 0]
     hist_and_cumulative(ratio, ax=ax, log=True)
     ax.set_xlabel("Ratio of On Time to Off Time")
@@ -2264,6 +2542,73 @@ def plot_onofftimes(onofftimes, max_frame, axs=None):
     ax.legend(loc='lower right')
 
     return fig, axs
+
+
+def plot_onofftimes2(onofftimes, samples_blinks, xlims=(1e3, 1e6)):
+    """Make a more detailed on off times plot"""
+
+    all_blinks = pd.concat(samples_blinks, ignore_index=True)
+    start_frame, end_frame = all_blinks.frame.min(), all_blinks.frame.max()
+
+    fig, axs = plt.subplots(2, 3, figsize=(15, 10))
+    plot_onofftimes(onofftimes, end_frame, axs)
+
+    # split on and off times
+    ontimes, offtimes = get_on_and_off_times(onofftimes, True)
+
+    # add cumulative distribution
+    fit_and_plot_se_pl_ccdf(offtimes, ax=axs[0, -1])
+
+    # add occurences
+    ax_occur = axs[-1, -1]
+    plot_occurences(samples_blinks, 7, ax_occur)
+    ax_occur.set_xscale("log")
+    ax_occur.set_xlim(*xlims)
+
+    return fig, axs
+
+
+def do_trace_analysis(palm_data, basetitle, samples, directory="./", fractions=np.logspace(-1, 0, 3), radii=(0.1, 0.2, 0.3, 0.4, 0.5)):
+    """Make and save trace analyses"""
+    extract_fiducials = make_extract_fiducials_func(palm_data)
+
+    # iterate over sampling fractions
+    for f in fractions:
+        # include samples by closure, these won't change
+        new_samples = samples.sample(frac=f)
+
+        # iterate over radii
+        for radius in radii:
+            # extract samples
+            onofftimes, samples_blinks = get_onofftimes(new_samples, radius, extract_fiducials=extract_fiducials, prune_radius=1)
+            # if basetitle isn't formated correctly then we want to fail here
+            t = basetitle.format(radius, len(samples_blinks))
+            # process samples
+            samples_blinks = dask.delayed(samples_blinks).compute()
+            # make the figure
+            fig, axs = plot_onofftimes2(onofftimes, samples_blinks)
+            # save the figure
+            fig.suptitle(t, y=1.01)
+            fig.tight_layout()
+            fig.savefig(directory + t + ".png", dpi=300, bbox_inches="tight")
+
+
+def render_and_save(palm, directory):
+    """Utility function to render and save PALM images"""
+    for sxy in (0.1, 0.25):
+        for zp in (0.2, ):
+            for mag in (10, 25):
+                to_render = palm.grouped_nf[(palm.grouped_nf[["sigma_x", "sigma_y"]] < sxy).all(1)]
+                zmin, zmax = to_render.z0.quantile((zp, 1 - zp))
+                to_render = to_render[(zmin < to_render.z0) & (to_render.z0 < zmax)]
+
+                cimg = gen_img(palm.shape, to_render, mag=mag, diffraction_limit=True, zscaling=5 * 130)
+                cimg.zrange = np.array(cimg.zrange) / 1000
+                fig, ax = cimg.plot(norm_kwargs=dict(auto=True), subplots_kwargs=dict(figsize=(10, 8)))
+
+                fname = directory + "{} " + "{}X Grouped PALM Dim={}, r={:.2f}, gap={}, sxy lt {:.2f}".format(cimg.mag, 3, palm.group_radius, palm.group_gap, sxy) + "{}"
+                cimg.save_color(fname.format("Depthcoded", ".png"), auto=True)
+                cimg.save_alpha(fname.format("Alpha", ".tif"))
 
 
 def get_on_and_off_times(onofftimes, clip=False):
@@ -2315,7 +2660,7 @@ def hist_and_cumulative(data, ax=None, log=False):
     twin_ax.plot(sorted_data, b, color=color, ls="steps-mid")
     twin_ax.tick_params(axis='y', labelcolor=color)
     twin_ax.set_ylabel("CDF", color=color)
-    twin_ax.set_ylim(ymin=0)
+    twin_ax.set_ylim(bottom=0)
 
     return fig, ax
 
