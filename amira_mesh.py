@@ -45,7 +45,8 @@ label_base = "LABEL_Labels {{ byte strings }} @{:d}"
 
 def _normalize_str(s):
     """Does nothing now, will remove invalid characters in the future"""
-    return s
+    # need to add something for clashes
+    return ''.join(ch for ch in s if ch.isalnum())
 
 
 def pack_column(data, num, name):
@@ -55,13 +56,15 @@ def pack_column(data, num, name):
     if np.issubdtype(data.dtype, np.inexact):
         data = data.astype(np.float32)
         t = "float"
-    if np.issubdtype(data.dtype, np.integer):
+    elif np.issubdtype(data.dtype, np.integer):
         data = data.astype(np.int32)
         t = "int"
+    else:
+        raise TypeError("Type {} not recognized".format(data.dtype))
     packed = data.tobytes()
     var = "\n@{}\n".format(num)
     data_str = [var.encode(), packed]
-    column_name = column_base.format(t, name, num)
+    column_name = column_base.format(t, _normalize_str(name), num)
     return column_name, data_str
 
 
