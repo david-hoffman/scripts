@@ -320,7 +320,7 @@ class RawImages(object):
         )
 
         if not self.date_idx.is_monotonic:
-            logger.warn("Raw data's time index isn't monotonic")
+            logger.warning("Raw data's time index isn't monotonic")
 
         assert len(self.date_idx) == len(self.raw), "Date index and Raw data don't match, {}, {}".format(self.date_idx, self.raw)
 
@@ -915,8 +915,8 @@ class Data405(object):
             fig, ax = plt.subplots()
         else:
             fig = ax.get_figure()
-        # check if enough data exists to fit
-        if (self.data["reactivation"] > lower_limit).sum() > 100:
+        # check if enough data exists to fit (greater than 10 percent)
+        if (self.data["reactivation"] > lower_limit).sum() / len(self.data) > 0.1:
             # this is fast so no cost
             self.fit(lower_limit, upper_limit)
 
@@ -934,6 +934,8 @@ class Data405(object):
                         label = None
                     ax.axvline(edge, color="r", label=label)
         else:
+            self.popt = np.ones(3) * np.nan
+            self.pcov = np.ones((3, 3)) * np.nan
             warnings.warn("Not enough data to fit")
             self.data.plot(x="date_delta", y="reactivation", ax=ax)
 
@@ -1206,7 +1208,7 @@ class PALMExperiment(object):
         """Median intensity within masked (data) area, in # of photons"""
         # make sure intensity doesn't go to 0, doesn't make physical sense and would cause
         # contrast ratio to explode.
-        intensity = np.fmax(self.cached_data.masked_data_median - self.cached_data.masked_background_median, 1)
+        intensity = self.cached_data.masked_data_median - self.cached_data.masked_background_median
         return intensity.sort_index()
 
     @cached_property
@@ -1215,7 +1217,7 @@ class PALMExperiment(object):
         by average number of photons in data masked area"""
         # contrast after feedback is enabled
         # denominator is average number of photons per pixel
-        return self.nphotons / self.intensity
+        return self.nphotons / np.fmax(self.intensity, 1)
 
     def plot_feedback(self, **kwargs):
         """Make plots for time when feedback is on"""
@@ -1411,8 +1413,8 @@ class PALMExperiment(object):
         # make plot
         shared_hist = axs[0, 1].get_shared_x_axes()
         for (ax_plot, ax_hist), (p, contrast) in zip(axs, sorted(data_dict.items())):
-            # trim data
-            contrast = contrast.loc[s]
+            # trim data, sort first just in case
+            contrast = contrast.sort_index().loc[s]
             # turn off sharing on the histograms
             shared_hist.remove(ax_hist)
             # turn off x ticking on histograms
@@ -1452,7 +1454,7 @@ class PALMExperiment(object):
     def calc_density(self, diagnostics=False):
         """Estimate molecular density from decay of grouped counts"""
         # calculate cumulative counts prior to activation
-        pre_counts = self.grouped_counts.loc[:0].cumsum()
+        pre_counts = self.grouped_counts.loc[:0].cumsum().dropna()
         # reset min for fitting.
         pre_counts.index -= pre_counts.index.min()
 
@@ -1474,6 +1476,7 @@ class PALMExperiment(object):
 
         # save densities as object attributes.
         self.output["density"] = pre_counts.iloc[-1]
+        self.output["density_median"] = self.grouped_counts.loc[:0].median()
         self.output["density_asymptote"] = popt[-1]
 
         self.output["active_pixel_density"] = self.palm.data_mask.sum() / self.palm.data_mask.size
@@ -1491,9 +1494,9 @@ class PALMExperiment(object):
         s["kBK"] = s.ka * s.kb / s.kDB
         s["kBD"] = (s.A * s.B * (s.ka - s.kb)**2) / ((s.A + s.B) * (s.B * s.ka + s.A * s.kb))
 
-        s["tauDB"], s["tauBK"], s["tauBD"] = s.kDB, s.kBK, s.kBD
+        s["tauDB"], s["tauBK"], s["tauBD"] = 1 / s.kDB, 1 / s.kBK, 1 / s.kBD
 
-        for k in ("set_point", "density", "density_asymptote", "active_pixel_density"):
+        for k in ("set_point", "density", "density_median", "density_asymptote", "active_pixel_density"):
             s[k] = output[k]
 
         keys = (
@@ -2125,7 +2128,8 @@ def check_density(shape, data, mag, thresh_func=thresholding.threshold_triangle,
 
     # remove places with low values
     to_threshold = hist2d[hist2d > min_density]
-    to_threshold = to_threshold[to_threshold < np.percentile(hist2d[hist2d > min_density], 99)]
+    # remove outliers on the high end
+    to_threshold = to_threshold[to_threshold < np.percentile(to_threshold, 99)]
 
     thresh = thresh_func(to_threshold)
     max_thresh = np.percentile(hist2d[hist2d > thresh], 99)
@@ -2557,8 +2561,11 @@ def plot_onofftimes2(onofftimes, samples_blinks, xlims=(1e3, 1e6)):
     ontimes, offtimes = get_on_and_off_times(onofftimes, True)
 
     # add cumulative distribution
-    fit_and_plot_se_pl_ccdf(offtimes, ax=axs[0, -1])
-
+    try:
+        fit_and_plot_se_pl_ccdf(offtimes, ax=axs[0, -1])
+    except Exception as e:
+        logger.warning(e)
+        axs[0, -1].legend()
     # add occurences
     ax_occur = axs[-1, -1]
     plot_occurences(samples_blinks, 7, ax_occur)
@@ -2586,11 +2593,15 @@ def do_trace_analysis(palm_data, basetitle, samples, directory="./", fractions=n
             # process samples
             samples_blinks = dask.delayed(samples_blinks).compute()
             # make the figure
-            fig, axs = plot_onofftimes2(onofftimes, samples_blinks)
-            # save the figure
-            fig.suptitle(t, y=1.01)
-            fig.tight_layout()
-            fig.savefig(directory + t + ".png", dpi=300, bbox_inches="tight")
+            try:
+                fig, axs = plot_onofftimes2(onofftimes, samples_blinks)
+            except Exception as e:
+                logger.warning(e)
+            else:
+                # save the figure
+                fig.suptitle(t, y=1.01)
+                fig.tight_layout()
+                fig.savefig(directory + t + ".png", dpi=300, bbox_inches="tight")
 
 
 def render_and_save(palm, directory):
