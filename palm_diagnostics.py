@@ -589,15 +589,15 @@ class PALMData(object):
         self.drift_corrected = remove_drift(self.processed, self.drift)
         calc_fiducial_stats(self.drift_fiducials, diagnostics=True)
 
-    def group(self, r, zscaling=10):
+    def group(self, r, zscaling=10, nm_per_pix=130):
         """group the drift corrected data"""
-        gap, thresh = check_density(self.shape, self.drift_corrected, 1, dim=3, zscaling=zscaling * 130)
+        gap, thresh = check_density(self.shape, self.drift_corrected, 1, dim=3, zscaling=zscaling * nm_per_pix)
         mygap = int(gap(r))
         self.group_radius = r
         self.group_gap = mygap
         self.group_thresh = thresh
         logger.info("Grouping gap is being set to {}".format(mygap))
-        self.grouped = slab_grouper([self.drift_corrected], radius=r, gap=mygap, zscaling=zscaling * 130, numthreads=48)[0]
+        self.grouped = slab_grouper([self.drift_corrected], radius=r, gap=mygap, zscaling=zscaling * nm_per_pix, numthreads=os.cpu_count())[0]
 
     def find_fiducials(self, data="drift_corrected", **kwargs):
         """"""
@@ -847,7 +847,7 @@ class Data405(object):
         from scipy.interpolate import interp1d
         calibrate = interp1d(calibration["voltage"], calibration["mean"])
         calibrated = True
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
         warnings.warn("Calibration not available ...")
 
         def calibrate(self, array):
@@ -986,7 +986,6 @@ class PALMExperiment(object):
             self.cached_data.index = self.time_idx
 
         self.output = dict()
-        # active_pixel_density=palm.data_mask.sum() / palm.data_mask.size
 
     def __repr__(self):
         """A representation of this class"""
