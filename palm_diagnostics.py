@@ -485,7 +485,7 @@ class PALMData(object):
                 )
 
     @classmethod
-    def load_sav(cls, path_to_sav, verbose=False, processed_only=False, include_width=False):
+    def load_sav(cls, path_to_sav, verbose=False, processed_only=True, include_width=False, iPALM=False):
         """To initialize the experiment we need to know where the raw data is
         and where the peakselector processed data is
 
@@ -526,6 +526,10 @@ class PALMData(object):
                     'Y Peak Width': "width_y",
                 }
             )
+
+        if iPALM:
+            peak_col.pop('Z Position')
+            peak_col['Unwrapped Z'] = 'z0'
 
         group_col = {
             'Frame Number': 'frame',
@@ -1837,7 +1841,7 @@ def fit_and_plot_power_law(trace, ul, offset, xmax, ll=None, ax=None, density=Fa
     elif norm:
         ax.set_ylabel("Fraction of Maximum")
     else:
-        ax.set_ylabel("Occurences (#)")
+        ax.set_ylabel("Occurrences (#)")
     ax.set_xlabel("Number of frames")
 
     return plt.gcf(), ax, popt, ul
@@ -1876,7 +1880,7 @@ def se_pl_ccdf(tdata, tau, beta, alpha, f, pre, tmin=1):
     return ccdf * pre
 
 
-def fit_and_plot_se_pl_ccdf(offtimes, density=True, ax=None):
+def fit_and_plot_se_pl_ccdf(offtimes, density=True, ax=None, return_all=False):
     """Personal communication from Muzhou Wang (Northwestern)
 
     He fits the complementary cumulative distribution of offtimes to a mixture of
@@ -1925,11 +1929,13 @@ def fit_and_plot_se_pl_ccdf(offtimes, density=True, ax=None):
         ax.legend()
     ax.set_xlabel("# of Frames")
     ax.set_ylabel("cCDF")
+    if return_all:
+        return fig, ax, dict(ccdf_tau=tau, ccdf_beta=beta, ccdf_alpha=alpha, ccdf_f=f, ccdf_pre=pre)
     return fig, ax
 
 
-def plot_occurences(samples_blinks, num=10, ax=None):
-    """Make a plot of occurences as a function of number of frames.alpha
+def plot_occurrences(samples_blinks, num=10, ax=None, return_all=False):
+    """Make a plot of occurrences as a function of number of frames.alpha
 
     The 1 curve shows the fraction of molecules that have occured *only* once at that frame
 
@@ -1945,35 +1951,44 @@ def plot_occurences(samples_blinks, num=10, ax=None):
 
     # find on frames
     all_onframes = pd.concat([calc_onframes(s) for s in tqdm.tqdm(samples_blinks, desc="Getting on frames")], ignore_index=True)
-    # calculate the number of occurences in each frame
+    # calculate the number of occurrences in each frame
     frames_and_occurrences = all_onframes.groupby(["occurrence", "frame"]).size()
 
     # reset the index to start at 1 for loglog plottings
     frames_and_occurrences.index = frames_and_occurrences.index.set_levels(frames_and_occurrences.index.levels[1] - frames_and_occurrences.index.levels[1].min() + 1, level=1)
     frames_and_occurrences /= frames_and_occurrences[1].sum()
 
+    all_blinks = pd.concat(samples_blinks, ignore_index=True)
+    start_frame, end_frame = all_blinks.frame.min(), all_blinks.frame.max()
+
+    results = dict(start_frame=start_frame, end_frame=end_frame)
     for i in range(1, num + 1):
         trace = frames_and_occurrences[i].sub(frames_and_occurrences[i + 1], fill_value=0).cumsum()
         trace.plot(ax=ax, label=str(i))
+        # record the peak of each trace, setting it back relative to zero frame.
+        results["occurrence_{}_peak".format(i)] = trace.idxmax() + start_frame
 
     ax.legend()
     ax.set_ylabel("Fraction of Molecules Observed # of Times")
-
-    all_blinks = pd.concat(samples_blinks, ignore_index=True)
-    start_frame, end_frame = all_blinks.frame.min(), all_blinks.frame.max()
 
     if start_frame > 1:
         ax.set_xlabel("Frame # - ${}$".format(latex_format_e(start_frame)))
     else:
         ax.set_xlabel("Frame #")
 
+    if return_all:
+        return fig, ax, results
     return fig, ax
 
 
-def plot_blinks(gap, max_frame, onofftimes=None, samples_blinks=None, ax=None, min_sigma=0, coords="xyz", density=False):
+def plot_blinks(gap, max_frame, onofftimes=None, samples_blinks=None, ax=None, min_sigma=0, coords="xyz", density=False, return_all=False):
     """Plot blinking events given on off times and fitted power law decay of off times"""
     if ax is None:
-        fig, ax = plt.subplots(1)
+        fig, ax = plt.subplots()
+    else:
+        fig = ax.get_figure()
+
+    results = dict()
 
     # calculate the number of events for each purported molecule
     if samples_blinks is not None:
@@ -1996,7 +2011,7 @@ def plot_blinks(gap, max_frame, onofftimes=None, samples_blinks=None, ax=None, m
     blinks = blinks.astype(int)
 
     # Fit to zero-truncated poisson
-    for guess in itt.product(*[(0.1, 0.5, 1, 2, 3)]*2):
+    for guess in itt.product(*[(0.1, 0.5, 1, 2, 3)] * 2):
         try:
             alpha, mu = fit_ztnb(blinks, x0=guess)
             # if successful fit, break
@@ -2010,7 +2025,11 @@ def plot_blinks(gap, max_frame, onofftimes=None, samples_blinks=None, ax=None, m
     # calculate histograms
     x = np.arange(blinks.max() + 1)[1:]
     y = np.bincount(blinks)[1:]
-    label = "$\mu_{{data}}={:.2f}$, $p_{{50^{{th}}}}={}$".format(blinks.mean(), int(np.median(blinks)))
+
+    mu_data = blinks.mean()
+    p50th = int(np.median(blinks))
+    results.update(dict(mu_data=mu_data, p50th=p50th))
+    label = "$\\mu_{{data}}={:.2f}$, $p_{{50^{{th}}}}={}$".format(mu_data, p50th)
     # normalize
     N = y.sum()
     y = y / N
@@ -2018,17 +2037,21 @@ def plot_blinks(gap, max_frame, onofftimes=None, samples_blinks=None, ax=None, m
     # plot fit
     if alpha:
         fit = NegBinom(alpha, mu).pmf(x) / (1 - NegBinom(alpha, mu).pmf(0))
-        label += "\n" + r"$\alpha={:.2f}$, $\mu_{{\lambda}}={:.2f}$, $\sigma_{{\lambda}}={:.2f}$".format(alpha, mu, mu / np.sqrt(alpha))
+        sigma_lam = mu / np.sqrt(alpha)
+        results.update(dict(nb_mu=mu, nb_alpha=alpha, nb_sigma_lam=sigma_lam))
+
+        label += "\n" + r"$\alpha={:.2f}$, $\mu_{{\lambda}}={:.2f}$, $\sigma_{{\lambda}}={:.2f}$".format(alpha, mu, sigma_lam)
         if density:
             ax.set_ylabel("Frequency")
         else:
-            ax.set_ylabel("Occurences (#)")
+            ax.set_ylabel("Occurrences (#)")
             fit = fit * N
             y = y * N
 
         ax.step(x, fit, where="mid", color="k", linestyle=":")
 
     label += "\nGap = {:g}, % Trace = {:.1%}".format(gap, gap / max_frame)
+    results.update(dict(gap=gap, p_trace=gap / max_frame))
 
     ax.step(x, y, label=label, where="mid")
     ax.legend()
@@ -2036,7 +2059,9 @@ def plot_blinks(gap, max_frame, onofftimes=None, samples_blinks=None, ax=None, m
     ax.set_xlabel("# of events / molecule")
     ax.set_title("Long Term Blinking")
 
-    return plt.gcf(), ax, blinks
+    if return_all:
+        return fig, ax, blinks, results
+    return fig, ax, blinks
 
 
 def prune_blobs(df, radius):
@@ -2505,11 +2530,11 @@ def get_onofftimes(samples, extract_radius, data=None, extract_fiducials=None, p
     return onofftimes, samples_blinks
 
 
-def plot_onofftimes(onofftimes, max_frame, axs=None):
+def plot_onofftimes(onofftimes, max_frame, axs=None, return_all=False):
     """Plot on and off times"""
     # now compute on and offtimes
     ontimes, offtimes = get_on_and_off_times(onofftimes)
-
+    results = dict()
     # make figure if none is provided
     if axs is None:
         fig, axs = plt.subplots(2, 2, figsize=(10, 10))
@@ -2518,7 +2543,9 @@ def plot_onofftimes(onofftimes, max_frame, axs=None):
 
     # add plots
     _, _, power = fit_plot_ontimes(ontimes, ax=axs[0, 0])
+    results["ontime_alpha"] = power.alpha
     _, _, popt = fit_plot_offtimes(offtimes, ax=axs[0, 1])
+    results["offtime_alpha"] = popt[1]
 
     # add legends
     for ax in axs[0]:
@@ -2527,10 +2554,11 @@ def plot_onofftimes(onofftimes, max_frame, axs=None):
     # add cutoffs
     # 1e-2, 1e-4, 1e-6
     my_cutoffs = cutoffs(offtimes, (0.99, 0.999, 0.9999))
-    for gap, cp in zip(*my_cutoffs):
+    for i, (gap, cp) in enumerate(zip(*my_cutoffs)):
         line = mlines.Line2D([gap, gap, 0], [0, cp, cp], color="r")
         axs[0, 1].add_line(line)
-        plot_blinks(gap, max_frame, onofftimes, density=True, ax=axs[1, 1])
+        _, _, _, blink_results = plot_blinks(gap, max_frame, onofftimes, density=True, ax=axs[1, 1], return_all=True)
+        results.update({k + str(i): v for k, v in blink_results.items()})
 
     # calculate ratios
     _, ratio = calc_onoff_ratio(onofftimes)
@@ -2541,36 +2569,45 @@ def plot_onofftimes(onofftimes, max_frame, axs=None):
     ax.set_xlabel("Ratio of On Time to Off Time")
     ax.set_title("Dynamic Contrast Ratio")
     median = np.median(ratio)
+    results["dynamic_contrast_ratio"] = median
     ax.axvline(median, ls=":", color="k", label="Median = {:.2g}".format(median))
     ax.legend(loc='lower right')
 
+    if return_all:
+        return fig, axs, results
     return fig, axs
 
 
-def plot_onofftimes2(onofftimes, samples_blinks, xlims=(1e3, 1e6)):
+def plot_onofftimes2(onofftimes, samples_blinks, xlims=(1e3, 1e6), return_all=False):
     """Make a more detailed on off times plot"""
 
     all_blinks = pd.concat(samples_blinks, ignore_index=True)
     start_frame, end_frame = all_blinks.frame.min(), all_blinks.frame.max()
 
     fig, axs = plt.subplots(2, 3, figsize=(15, 10))
-    plot_onofftimes(onofftimes, end_frame, axs)
+    _, _, onofftimes_results = plot_onofftimes(onofftimes, end_frame, axs, return_all=return_all)
 
     # split on and off times
     ontimes, offtimes = get_on_and_off_times(onofftimes, True)
 
     # add cumulative distribution
     try:
-        fit_and_plot_se_pl_ccdf(offtimes, ax=axs[0, -1])
+        _, _, ccdf_results = fit_and_plot_se_pl_ccdf(offtimes, ax=axs[0, -1], return_all=return_all)
     except Exception as e:
+        # Make empty data for later if return_all requested
+        ccdf_results = dict()
         logger.warning(e)
         axs[0, -1].legend()
-    # add occurences
+    # add occurrences
     ax_occur = axs[-1, -1]
-    plot_occurences(samples_blinks, 7, ax_occur)
+    _, _, occurrence_results = plot_occurrences(samples_blinks, 7, ax_occur, return_all=return_all)
     ax_occur.set_xscale("log")
     ax_occur.set_xlim(*xlims)
 
+    if return_all:
+        # aggregate results
+        results = {**onofftimes_results, **ccdf_results, **occurrence_results}
+        return fig, axs, pd.Series(results)
     return fig, axs
 
 
@@ -2593,7 +2630,7 @@ def do_trace_analysis(palm_data, basetitle, samples, directory="./", fractions=n
             samples_blinks = dask.delayed(samples_blinks).compute()
             # make the figure
             try:
-                fig, axs = plot_onofftimes2(onofftimes, samples_blinks)
+                fig, axs, results = plot_onofftimes2(onofftimes, samples_blinks, return_all=True)
             except Exception as e:
                 logger.warning(e)
             else:
@@ -2601,6 +2638,8 @@ def do_trace_analysis(palm_data, basetitle, samples, directory="./", fractions=n
                 fig.suptitle(t, y=1.01)
                 fig.tight_layout()
                 fig.savefig(directory + t + ".png", dpi=300, bbox_inches="tight")
+                results.to_csv(directory + t + ".csv")
+            gc.collect()
 
 
 def render_and_save(palm, directory):
