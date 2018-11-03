@@ -17,6 +17,8 @@ import matplotlib.pyplot as plt
 import subprocess
 import hashlib
 import tempfile
+import itertools as itt
+import dask
 # import our ability to read and write MRC files
 import Mrc
 
@@ -39,6 +41,9 @@ except ImportError:
     from numpy.fft import (fftshift, ifftshift, fftn, ifftn, rfftn, fftfreq,
                            rfftfreq)
 from skimage.external import tifffile as tif
+
+import logging
+logger = logging.getLogger(__name__)
 
 
 class PSFFinder(object):
@@ -90,7 +95,7 @@ class PSFFinder(object):
         new_blobs_df = blobs_df[
             blobs_df.sigma_x < max_s
         ].sort_values(
-            ['amp','SNR', 'sigma_x'], ascending=[False, False, True]
+            ['amp', 'SNR', 'sigma_x'], ascending=[False, False, True]
         ).reset_index(drop=True)
         # set the internal state to the selected blobs
         my_PF.blobs = new_blobs_df[
@@ -982,8 +987,9 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
         stderr=subprocess.PIPE
     )
     if return_code.stderr:
-        raise RuntimeError(return_code.stderr.decode())
+        logger.error(return_code.stderr.decode())
     return return_code.stdout.decode('utf-8').split('\n')
+
 
 def formatter(value):
     if isinstance(value, float):
@@ -1328,7 +1334,7 @@ def extend_and_window_tile(tile, pad_size, tile_num, num_tiles,
         yslice = slice(ybefore, None)
     else:
         yslice = slice(ybefore, -yafter)
-    slices = [Ellipsis, yslice, xslice]
+    slices = (Ellipsis, yslice, xslice)
     return tile * win_2d, slices
 
 
@@ -1363,12 +1369,10 @@ def combine_img_with_padding_window(recon_split_data, padding,
         raise RuntimeError(
             "Unexpected data shape = {}".format(recon_split_data.shape))
     to_combine_data = np.zeros(newdata_shape, dtype=recon_split_data.dtype)
-    for i, d in tqdm.tqdm_notebook(
-        enumerate(recon_split_data), "Recombining", num_tiles, False
-    ):
-        current_tile, slices = extend_and_window_tile(d, padding * zoom, i,
-                                                      num_tiles,
-                                                      window_func=window_func)
+    for i, d in tqdm.tqdm(enumerate(recon_split_data), "Recombining", num_tiles, False):
+        current_tile, slices = extend_and_window_tile(
+            d, padding * zoom, i, num_tiles, window_func=window_func
+        )
         to_combine_data[slices] += current_tile
     # we need to get rid of the reflected bits
     edge_pix = (padding // 2) * zoom
@@ -1386,6 +1390,8 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     -------
     total_save_path, sirecon_ouput
     '''
+    # make copy so internals don't change.
+    sim_kwargs = sim_kwargs.copy()
     # save output name for later
     outname = sim_kwargs["output_file"]
     # make sure zoomfact is integer
@@ -1408,8 +1414,7 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     # make temp directory to work in
     with tempfile.TemporaryDirectory() as dir_name:
         # save split data
-        for i, data in tqdm.tqdm_notebook(
-            enumerate(split_data), "Splitting and saving data", num_tiles, False):
+        for i, data in tqdm.tqdm(enumerate(split_data), "Splitting and saving data", num_tiles, False):
             # save subimages in sub folder, use sha as ID
             savepath = os.path.join(dir_name,
                                     'sub_image{:06d}_{}.mrc'.format(i, sha))
@@ -1421,13 +1426,10 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
             elif bg_estimate == 'mode':
                 bgs[i] = np.argmax(np.bincount(data.ravel()))
         # set up re
-        i_re = re.compile('(?<=sub_image)\d+')
+        i_re = re.compile(r'(?<=sub_image)\d+')
         # process data
         sirecon_ouput = []
-        for path in tqdm.tqdm_notebook(
-            glob.iglob(dir_name + '/sub_image*_{}.mrc'.format(sha)),
-            "Processing tiles", num_tiles, False
-        ):
+        for path in tqdm.tqdm(glob.iglob(dir_name + '/sub_image*_{}.mrc'.format(sha)), "Processing tiles", num_tiles, False):
             # update the kwargs to have the input file.
             sim_kwargs.update({
                 'input_file': path,
@@ -1436,7 +1438,9 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
             if bg_estimate:
                 i = int(re.findall(i_re, path)[0])
                 sim_kwargs['background'] = float(bgs[i])
-            sirecon_ouput += simrecon(**sim_kwargs)
+            sirecon_ouput.append(dask.delayed(simrecon)(**sim_kwargs))
+
+        sirecon_ouput = list(itt.chain.from_iterable(dask.delayed(sirecon_ouput).compute()))
         # read in processed data
         recon_split_data = np.array([
             Mrc.Mrc(path).data
@@ -1483,15 +1487,11 @@ def process_txt_output(txt_buffer):
     Take out put from above and parse into angles
     '''
     # compile the regexes
-    ndir_re = re.compile('(?<=ndirs=)\d+', flags=re.M)
-    angle_re = re.compile('(?:amplitude:\n In.*)(?<=angle=)(-?\d+\.\d+)',
-                          flags=re.M)
-    mag_re = re.compile('(?:amplitude:\n In.*)(?<=mag=)(-?\d+\.\d+)',
-                        flags=re.M)
-    amp_re = re.compile('(?:amplitude:\n In.*)(?<=amp=)(-?\d+\.\d+)',
-                        flags=re.M)
-    phase_re = re.compile('(?:amplitude:\n In.*)(?<=phase=)(-?\d+\.\d+)',
-                          flags=re.M)
+    ndir_re = re.compile(r'(?<=ndirs=)\d+', flags=re.M)
+    angle_re = re.compile(r'(?:amplitude:\n In.*)(?<=angle=)(-?\d+\.\d+)', flags=re.M)
+    mag_re = re.compile(r'(?:amplitude:\n In.*)(?<=mag=)(-?\d+\.\d+)', flags=re.M)
+    amp_re = re.compile(r'(?:amplitude:\n In.*)(?<=amp=)(-?\d+\.\d+)', flags=re.M)
+    phase_re = re.compile(r'(?:amplitude:\n In.*)(?<=phase=)(-?\d+\.\d+)', flags=re.M)
     # parse output
     my_dirs = set(re.findall(ndir_re, txt_buffer))
     assert len(my_dirs) == 1, my_dirs
@@ -1515,8 +1515,7 @@ def plot_params(angles, mags, amps, phases):
     titles = ('Angles', 'Magnitudes', 'Amplitudes', 'Phase')
     norients = angles.shape[-1]
     fig, axs = plt.subplots(4, norients, figsize=(norients * 4, 4 * 4))
-    for row, data, t, c in zip(axs, (angles, mags, amps, phases),
-                            titles, ('viridis', 'viridis', 'viridis', 'seismic')):
+    for row, data, t, c in zip(axs, (angles, mags, amps, phases), titles, ('viridis', 'viridis', 'viridis', 'seismic')):
         for i, ax in enumerate(row):
             # if angles we don't want absolute values.
             if 'Angles' in t:
@@ -1596,7 +1595,7 @@ def stitch_tiled_sim_img(sim_img_path, tile_size=None):
     # determin tile_size from file name if not given
     if tile_size is None:
         # make a regex
-        tile_re = re.compile('(?<=proc)\d+')
+        tile_re = re.compile(r'(?<=proc)\d+')
         # apply it, there should only be one occurance
         re_result = re.findall(tile_re, sim_img_path)
         assert len(re_result) == 1, "More than one Regex found."
