@@ -501,6 +501,23 @@ class PALMData(object):
                'Label Set', 'XY Ellipticity', 'Z Position', 'Sigma Z',
                'XY Group Ellipticity', 'Group Z Position', 'Group Sigma Z'],
               dtype='<U20')
+
+        iPALM columns:
+        Index(['Offset', 'Amplitude', 'X Position', 'Y Position', 'X Peak Width',
+           'Y Peak Width', '6 N Photons', 'ChiSquared', 'FitOK', 'Frame Number',
+           'Peak Index of Frame', 'Peak Global Index', '12 X PkW * Y PkW',
+           'Sigma Amplitude', 'Sigma X Pos rtNph', 'Sigma Y Pos rtNph',
+           'Sigma X Pos Full', 'Sigma Y Pos Full', '18 Grouped Index',
+           'Group X Position', 'Group Y Position', 'Group Sigma X Pos',
+           'Group Sigma Y Pos', 'Group N Photons', '24 Group Size',
+           'Frame Index in Grp', 'Label Set', 'Amplitude L1', 'Amplitude L2',
+           'Amplitude L3', '30 FitOK Labels', 'Zeta0', 'Sigma Amp L2',
+           'Sigma Amp L3', 'Z Position', 'Sigma Z', '36 Coherence', 'Group A1',
+           'Group A2', 'Group A3', 'Group Z Position', 'Group Sigma Z',
+           '42 Group Coherence', 'XY Ellipticity', 'Unwrapped Z',
+           'Unwrapped Z Error', 'XY Group Ellipticity', 'Unwrapped Group Z',
+           'Unwrapped Group Z Error'],
+          dtype='object')
         """
 
         # add gaussian widths
@@ -530,6 +547,7 @@ class PALMData(object):
         if iPALM:
             peak_col.pop('Z Position')
             peak_col['Unwrapped Z'] = 'z0'
+            peak_col['Unwrapped Z Error'] = "z0_e"
 
         group_col = {
             'Frame Number': 'frame',
