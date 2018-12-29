@@ -1,6 +1,13 @@
-# # PALM Blinking and Decay Analysis
-# The purpose of this notebook is to analyze PALM diagnostic data in a consistent way across data sets.
-# The basic experiment being analyzed here is data that has been reactivated and deactivated multiple times.
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# palm_diagnostics.py
+"""
+PALM Blinking and Decay Analysis
+The purpose of this notebook is to analyze PALM diagnostic data in a consistent way across data sets.
+The basic experiment being analyzed here is data that has been reactivated and deactivated multiple times.
+
+Copyright David Hoffman, 2018
+"""
 
 import gc
 import warnings
@@ -45,7 +52,7 @@ from pyPALM.grouping import *
 from pyPALM.render import gen_img, save_img_3d, tif_convert
 
 from scipy.spatial import cKDTree
-from scipy.stats import poisson
+from scipy.stats import poisson, ks_2samp
 from scipy.special import gamma, zeta, gammainc, gammaincc
 
 # override any earlier imports
@@ -58,10 +65,15 @@ from hdbscan import HDBSCAN
 
 from copy import copy
 
+import colorcet
 import logging
 
 logger = logging.getLogger()
 
+# isoluminant colormaps
+colorcet.register_cmap("rainbow_bgyrm_35_85_c69", cmap=colorcet.cm.rainbow_bgyrm_35_85_c69)
+colorcet.register_cmap("isolum", cmap=colorcet.cm.isolum)
+colorcet.register_cmap("colorwheel", cmap=colorcet.cm.colorwheel)
 
 greys_alpha_cm = ListedColormap([(i / 255,) * 3 + ((255 - i) / 255,) for i in range(256)])
 
@@ -106,14 +118,21 @@ def calc_bins(raw_data, subsampling=10):
     return ybins, xbins
 
 
-def filter_fiducials(df, blobs, radius):
+def filter_fiducials(df, blobs, radius, zradius=None):
     """Do the actual filtering
-    
+
     We're doing it sequentially because we may run out of memory.
     If initial DataFrame is 18 GB (1 GB per column) and we have 200 """
     blob_filt = pd.Series(np.ones(len(df)), index=df.index, dtype=bool)
-    for i, (y, x) in enumerate(tqdm.tqdm(blobs, leave=False, desc="Filtering Fiducials")):
-        bead_filter = np.sqrt((df.x0 - x) ** 2 + (df.y0 - y) ** 2) > radius
+    for i, zyx in enumerate(tqdm.tqdm(blobs, leave=False, desc="Filtering Fiducials")):
+        if len(zyx) > 2:
+            z, y, x = zyx
+        else:
+            y, x = zyx
+        if zradius:
+            bead_filter = np.sqrt(((df.x0 - x) / radius) ** 2 + ((df.y0 - y) / radius) ** 2 + ((df.z0 - z) / zradius) ** 2) > 1
+        else:
+            bead_filter = np.sqrt((df.x0 - x) ** 2 + (df.y0 - y) ** 2) > radius
         blob_filt &= bead_filter
         del bead_filter
         if not i % 10:
@@ -128,8 +147,12 @@ def remove_fiducials(df, yx_shape, df2=None, exclusion_radius=1, **kwargs):
     removing all localizations with in exclusion radius of the found ones"""
     if df2 is None:
         df2 = df
-    blobs = find_fiducials(df, yx_shape, **kwargs)
-    df3 = filter_fiducials(df2, blobs, exclusion_radius)
+    try:
+        blobs = find_fiducials(df, yx_shape, **kwargs)
+        df3 = filter_fiducials(df2, blobs, exclusion_radius)
+    except RuntimeError as e:
+        logger.error(e)
+        df3 = df2
     # plt.matshow(np.histogramdd(df3[["Y Position", "X Position"]].values, bins=(ybins, xbins))[0], vmax=10, cmap="inferno")
     return df3
 
@@ -470,6 +493,9 @@ class PALMData(object):
         self.drift_corrected = drift_corrected
         self.grouped = grouped
 
+        # diagnostics on?
+        self.diagnostics = False
+
     def __repr__(self):
         """"""
         internal_params = []
@@ -609,27 +635,41 @@ class PALMData(object):
             **kwargs
         )
         self.drift_corrected = remove_drift(self.processed, self.drift)
-        calc_fiducial_stats(self.drift_fiducials, diagnostics=True)
+        calc_fiducial_stats(self.drift_fiducials, diagnostics=self.diagnostics)
 
-    def group(self, r, zscaling=10, nm_per_pix=130):
+    def group(self):
         """group the drift corrected data"""
-        gap, thresh = check_density(self.shape, self.drift_corrected, 1, dim=3, zscaling=zscaling * nm_per_pix)
-        mygap = int(gap(r))
-        self.group_radius = r
-        self.group_gap = mygap
-        self.group_thresh = thresh
-        logger.info("Grouping gap is being set to {}".format(mygap))
-        self.grouped = slab_grouper([self.drift_corrected], radius=r, gap=mygap, zscaling=zscaling * nm_per_pix, numthreads=os.cpu_count())[0]
+        # get zscaling
+        self.zscaling = calculate_zscaling(self.drift_corrected, diagnostics=self.diagnostics)
+        # estimate grouping radius
+        self.group_radius = estimate_grouping_radius(self.drift_corrected, zscaling=self.zscaling)
+        # get gap function from density
+        self.gap = check_density(self.shape, self.drift_corrected, 1, dim=3, zscaling=self.zscaling)
+        # set up grouping gap
+        self.group_gap = int(self.gap(self.group_radius[0.99], diagnostics=self.diagnostics))
+        logger.info("Grouping gap is being set to {}".format(self.group_gap))
+        plt.show()
+        self.grouped = slab_grouper(
+            [self.drift_corrected],
+            radius=self.group_radius[0.99],
+            gap=self.group_gap,
+            zscaling=self.zscaling,
+            numthreads=os.cpu_count()
+        )[0]
 
     def find_fiducials(self, data="drift_corrected", **kwargs):
         """"""
         data = getattr(self, data)
-        self.fiducials = find_fiducials(data, self.shape, **kwargs)
+        try:
+            self.fiducials = find_fiducials(data, self.shape, **kwargs)
+        except RuntimeError as e:
+            logger.error(e)
+            self.fiducials = []
         return self.fiducials
 
     @cached_property
     def fiducials(self):
-        return self.find_fiducials("drift_corrected", diagnostics=True)
+        return self.find_fiducials("drift_corrected", diagnostics=self.diagnostics)
 
     def remove_fiducials(self, radius):
         """remove fiducials from data"""
@@ -638,7 +678,11 @@ class PALMData(object):
                 df = getattr(self, df_title)
             except AttributeError:
                 continue
+            if df is None:
+                continue
+                
             df_nf = filter_fiducials(df, self.fiducials, radius)
+
             setattr(self, df_title + "_nf", df_nf)
         self.make_fiducial_mask(radius)
 
@@ -675,15 +719,15 @@ class PALMData(object):
         thresh = thresholding.threshold_triangle(cimg)
         return cimg > thresh
 
-    def threshold(self, data="grouped_nf", diagnostics=True):
+    def threshold(self, data="grouped_nf", mag=1):
         """Find a threshold that discriminates between biology and background"""
         # pull internal data structure
         data = getattr(self, data)
         # generate histogram
-        cimg = gen_img(self.shape, data, mag=1, hist=True, cmap=None)
+        cimg = gen_img(self.shape, data, mag=mag, hist=True, cmap=None)
         # find threshold
         thresh = thresholding.threshold_triangle(cimg)
-        if diagnostics:
+        if self.diagnostics:
             ny, nx = cimg.shape
             fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(8 * nx / ny, 4))
 
@@ -691,6 +735,7 @@ class PALMData(object):
             ax0.set_title("Data")
             ax1.matshow(cimg, vmin=thresh, cmap=greys_limit)
             ax1.set_title("Data and Thresholds")
+        self.thresh = thresh
         return thresh
 
     def make_fiducial_mask(self, radius):
@@ -845,6 +890,8 @@ class PALMData(object):
         thresh = self.threshold("grouped_nf")
         cuts_grouped = [pd.cut(self.grouped_nf[c + "0"], np.arange(0, s + bin_size, bin_size)) for c, s in zip("yx", self.shape)]
         filt = self.grouped_nf.groupby(cuts_grouped).size() < thresh
+
+        self.active_pixels = (~filt).sum()
 
         if not low:
             filt = ~filt
@@ -1472,7 +1519,7 @@ class PALMExperiment(object):
 
         return fig, axs
 
-    def calc_density(self, diagnostics=False):
+    def calc_density(self):
         """Estimate molecular density from decay of grouped counts"""
         # calculate cumulative counts prior to activation
         pre_counts = self.grouped_counts.loc[:0].cumsum().dropna()
@@ -1487,7 +1534,7 @@ class PALMExperiment(object):
             popt = [np.nan]
 
         # make simple plot if requested
-        if diagnostics:
+        if self.diagnostics:
             fig, ax = plt.subplots()
             pre_counts.plot(ax=ax, label="Data")
             if len(popt) > 1:
@@ -1676,9 +1723,9 @@ def on_off_times_fast(df):
 
 def fast_group(df, gap):
     """Group data assuming that spatial bits have been taken care of"""
-    df = df.copy()
+    df = df.sort_values("frame")
     frame_diff = df.frame.diff()
-    df["group_id"] = (frame_diff >= gap).cumsum()
+    df["group_id"] = (frame_diff > gap).cumsum()
     return df
 
 
@@ -1810,7 +1857,7 @@ def fit_power_law(x, y, maxiters=100, floor=0.1, upper_limit=None, lower_limit=N
     else:
         if maxiters > 1:
             warnings.warn("Max iters reached")
-    return popt, upper_limit
+    return popt, pcov, upper_limit
 
 
 def fit_and_plot_power_law(trace, ul, offset, xmax, ll=None, ax=None, density=False, norm=False):
@@ -1821,7 +1868,9 @@ def fit_and_plot_power_law(trace, ul, offset, xmax, ll=None, ax=None, density=Fa
 
     if ax is None:
         fig, ax = plt.subplots(1)
-    popt, ul = fit_power_law(x, y, 10, include_offset=offset, upper_limit=ul, lower_limit=ll)
+    else:
+        fig = ax.get_figure()
+    popt, pcov, ul = fit_power_law(x, y, 10, include_offset=offset, upper_limit=ul, lower_limit=ll)
 
     # build display equation
     eqn = r"$\alpha = {:.2f}"
@@ -2146,7 +2195,7 @@ def prune_blobs(df, radius):
         ]]
 
 
-def check_density(shape, data, mag, thresh_func=thresholding.threshold_triangle, diagnostics=True, dim=3, zscaling=5 * 130):
+def check_density(shape, data, mag, zscaling, thresh_func=thresholding.threshold_triangle, dim=3):
     """Check the density of the data and find the 99th percentile density
 
     Return a function that calculates maximal grouping gap from grouping radius
@@ -2174,40 +2223,46 @@ def check_density(shape, data, mag, thresh_func=thresholding.threshold_triangle,
     to_threshold = to_threshold[to_threshold < np.percentile(to_threshold, 99)]
 
     thresh = thresh_func(to_threshold)
-    max_thresh = np.percentile(hist2d[hist2d > thresh], 99)
+    biology = hist2d[hist2d > thresh]
 
-    # calculate density in # molecules / unit area (volume) / frame
-    frame_range = data.frame.max() - data.frame.min()
-    frame_density = max_thresh / frame_range
+    def gap(r, percentile=99, scale=10.274, exponent=-0.785, diagnostics=True):
+        """Calculate the gap based on a percentile and r
+        Scale and exponent have been experimentally determined"""
+        max_thresh = np.percentile(biology, percentile)
 
-    if diagnostics:
-        fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(8 * nx / ny, 4))
+        # calculate density in # molecules / unit area (volume) / frame
+        frame_range = data.frame.max() - data.frame.min()
+        event_density = max_thresh / frame_range
 
-        ax0.matshow(hist2d, norm=PowerNorm(0.5), vmax=max_thresh, cmap="Greys_r")
-        ax0.set_title("Data")
-        ax1.matshow(hist2d, norm=PowerNorm(0.5), vmin=thresh, vmax=max_thresh, cmap=greys_limit)
-        ax0.set_title("Data and Thresholds")
+        if diagnostics:
+            fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(8 * nx / ny, 4))
 
-        # plot of histogram
-        fig3, ax0 = plt.subplots(1)
-        ax0.hist(hist2d.ravel(), bins=np.logspace(1, np.log10(hist2d.max() + 10), 128), log=True, color="k")
-        ax0.set_xscale("log")
-        ax0.axvline(max_thresh, c="r", label="99% Thresh = {:g} # / area\n= {:g} # / area / frame".format(max_thresh, frame_density))
-        ax0.axvline(thresh, c="b", label="{} = {:g} # / area".format(thresh_func.__name__, thresh))
-        ax0.legend()
-        ax0.set_title("Histogram of Histogram Values")
+            ax0.matshow(hist2d, norm=PowerNorm(0.5), vmax=max_thresh, cmap="Greys_r")
+            ax0.set_title("Data")
+            ax1.matshow(hist2d, norm=PowerNorm(0.5), vmin=thresh, vmax=max_thresh, cmap=greys_limit)
+            ax0.set_title("Data and Thresholds")
 
-        # to_plot = hist2d[hist2d > 1]
-        # to_plot = to_plot[to_plot < max_thresh]
-        # ax1.hist(to_plot, bins=128, log=True, color="k")
-        fig3.tight_layout()
+            # plot of histogram
+            fig3, ax0 = plt.subplots(1)
+            ax0.hist(hist2d.ravel(), bins=np.logspace(1, np.log10(hist2d.max() + 10), 128), log=True, color="k")
+            ax0.set_xscale("log")
+            ax0.axvline(max_thresh, c="r", label="99% Thresh = {:g} # / area\n= {:g} # / area / frame".format(max_thresh, event_density))
+            ax0.axvline(thresh, c="b", label="{} = {:g} # / area".format(thresh_func.__name__, thresh))
+            ax0.legend()
+            ax0.set_title("Histogram of Histogram Values")
 
-    def gap(r):
+            # to_plot = hist2d[hist2d > 1]
+            # to_plot = to_plot[to_plot < max_thresh]
+            # ax1.hist(to_plot, bins=128, log=True, color="k")
+            fig3.tight_layout()
+
+        numerator = scale * event_density ** exponent
         if dim == 3:
-            return 1 / (4 / 3 * r ** 3 * frame_density)
-        return 1 / (r ** 2 * frame_density)
+            # volume of sphere is 4 / 3 pi r^3
+            return numerator / (4 / 3 * np.pi * (r ** 3))
+        return numerator / (np.pi * (r ** 2))
 
-    return gap, frame_density
+    return gap
 
 
 def mortensen(df, a2=1.0):
@@ -2526,7 +2581,65 @@ def make_extract_fiducials_func(data):
     return extract_fiducials
 
 
-def get_onofftimes(samples, extract_radius, data=None, extract_fiducials=None, prune_radius=2):
+def test_point_cloud(df, *, drift=None, coords="xy", diagnostics=False):
+    """Test if point cloud is likely to have come from a single emitter by comparing
+    the experimental distribution to an estimated distribution based on the experimentally
+    determined localization precisions
+
+    Parameters
+    ----------
+    df : DataFrame
+        Representation of the point cloud data, must have locations (x0, ...) and
+        precisions (sigma_x, ...)
+    drift : DataFrame
+        Residual drift in coordinates
+    coords : iterable
+        coordinates to use ("x", ...)
+    diagnostics : bool
+        Show plots
+
+    Returns
+    -------
+    pvalue : float
+        The minimum pvalue of all coordinates, the is the confidence with which
+        we can reject the null hypothesis that the point cloud comes from a single
+        emitter in each direction.
+    """
+    if len(df) == 1:
+        return 1.0
+
+    # pull coordinates and sigmas
+    x = [c + "0" for c in coords]
+    s = ["sigma_" + c for c in coords]
+
+    # get experimental parameters
+    real_pos = df[x]
+    sigmas = df[s].values
+
+    # make estimated point cloud
+    predicted_pos = np.random.randn(*real_pos.values.shape)
+    if drift is not None:
+        # add drift to localization precisions
+        sigmas = np.sqrt(sigmas**2 + drift[x].values**2)
+
+    # update positions based on localization precision
+    predicted_pos = predicted_pos * sigmas + real_pos.mean().values
+    predicted_pos = pd.DataFrame(predicted_pos, columns=real_pos.columns)
+
+    # plots if requested
+    if diagnostics:
+        if coords == "xyz":
+            ax = real_pos.plot.scatter("x0", "y0", c="z0")
+            predicted_pos.plot.scatter("x0", "y0", c="z0", marker="x", ax=ax)
+        else:
+            ax = real_pos.plot.scatter("x0", "y0")
+            predicted_pos.plot.scatter("x0", "y0", marker="x", ax=ax)
+
+    # return min pvalue of each coordinate
+    return min(ks_2samp(real_pos[c], predicted_pos[c]).pvalue for c in x)
+
+
+def get_onofftimes(samples, extract_radius, data=None, extract_fiducials=None, prune_radius=2, pvalue=None, drift=None):
     """Calculate onofftimes from samples"""
     if extract_fiducials is None:
         if data is None:
@@ -2539,6 +2652,10 @@ def get_onofftimes(samples, extract_radius, data=None, extract_fiducials=None, p
     n = len(samples)
     logging.info("Extracting {} samples ...".format(n))
     samples_blinks = extract_fiducials(samples[["y0", "x0"]].values, extract_radius)
+    if pvalue is not None:
+        # keep if we cannot reject null hypothesis that they are singles
+        logging.info("Filtering samples ...")
+        samples_blinks = [s for s in dask.delayed(samples_blinks).compute() if test_point_cloud(s, drift=drift) > pvalue]
     logging.info("Kept samples = {}%".format(int(len(samples_blinks) / n * 100)))
 
     # calculate on/off times
@@ -2629,7 +2746,9 @@ def plot_onofftimes2(onofftimes, samples_blinks, xlims=(1e3, 1e6), return_all=Fa
     return fig, axs
 
 
-def do_trace_analysis(palm_data, basetitle, samples, directory="./", fractions=np.logspace(-1, 0, 3), radii=(0.1, 0.2, 0.3, 0.4, 0.5)):
+def do_trace_analysis(palm_data, basetitle, samples, directory="./",
+                      fractions=np.logspace(-1, 0, 3), radii=(0.1, 0.2, 0.3, 0.4, 0.5),
+                      pvalue=None, drift=None):
     """Make and save trace analyses"""
     extract_fiducials = make_extract_fiducials_func(palm_data)
 
@@ -2641,7 +2760,8 @@ def do_trace_analysis(palm_data, basetitle, samples, directory="./", fractions=n
         # iterate over radii
         for radius in radii:
             # extract samples
-            onofftimes, samples_blinks = get_onofftimes(new_samples, radius, extract_fiducials=extract_fiducials, prune_radius=1)
+            onofftimes, samples_blinks = get_onofftimes(new_samples, radius, extract_fiducials=extract_fiducials, prune_radius=1,
+                                                        pvalue=pvalue, drift=drift)
             # if basetitle isn't formated correctly then we want to fail here
             t = basetitle.format(radius, len(samples_blinks))
             # process samples
