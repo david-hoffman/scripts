@@ -846,8 +846,16 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
     otf_file = os.path.abspath(otf_file)
     for file in (input_file, otf_file):
         assert os.path.exists(file), "{} doesn't exist!".format(file)
+
+    # wrap spaces so that paths can be found
+    # input_file = '"{}"'.format(input_file)
+    # output_file = '"{}"'.format(output_file)
+    # otf_file = '"{}"'.format(otf_file)
+
     # the list to pass to subprocess.call, this is just the beginning
+    # execute in powershell
     exc_list = [r'C:\SIMrecon_svn\sirecon', input_file, output_file, otf_file]
+    
     # insert default values into **kwargs here
     valid_kwargs = OrderedDict.fromkeys((
         'ndirs',
@@ -988,6 +996,7 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
     )
     if return_code.stderr:
         logger.error(return_code.stderr.decode())
+        logger.error(" ".join(exc_list))
     return return_code.stdout.decode('utf-8').split('\n')
 
 
