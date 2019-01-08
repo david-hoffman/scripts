@@ -124,7 +124,7 @@ def filter_fiducials(df, blobs, radius, zradius=None):
     We're doing it sequentially because we may run out of memory.
     If initial DataFrame is 18 GB (1 GB per column) and we have 200 """
     blob_filt = pd.Series(np.ones(len(df)), index=df.index, dtype=bool)
-    for i, zyx in enumerate(tqdm.tqdm(blobs, leave=False, desc="Filtering Fiducials")):
+    for i, zyx in enumerate(tqdm.tqdm_notebook(blobs, leave=False, desc="Filtering Fiducials")):
         if len(zyx) > 2:
             z, y, x = zyx
         else:
@@ -642,16 +642,17 @@ class PALMData(object):
         # get zscaling
         self.zscaling = calculate_zscaling(self.drift_corrected, diagnostics=self.diagnostics)
         # estimate grouping radius
-        self.group_radius = estimate_grouping_radius(self.drift_corrected, zscaling=self.zscaling)
+        self.group_radius = estimate_grouping_radius(self.drift_corrected, zscaling=self.zscaling)[0.99]
+        logger.info("Grouping radius is being set to {:.3f}".format(self.group_radius))
         # get gap function from density
         self.gap = check_density(self.shape, self.drift_corrected, 1, dim=3, zscaling=self.zscaling)
         # set up grouping gap
-        self.group_gap = int(self.gap(self.group_radius[0.99], diagnostics=self.diagnostics))
+        self.group_gap = int(self.gap(self.group_radius, diagnostics=self.diagnostics))
         logger.info("Grouping gap is being set to {}".format(self.group_gap))
         plt.show()
         self.grouped = slab_grouper(
             [self.drift_corrected],
-            radius=self.group_radius[0.99],
+            radius=self.group_radius,
             gap=self.group_gap,
             zscaling=self.zscaling,
             numthreads=os.cpu_count()
@@ -887,7 +888,7 @@ class PALMData(object):
         """
 
         # step 1 and 2
-        thresh = self.threshold("grouped_nf")
+        thresh = self.threshold("grouped_nf", 1 / bin_size)
         cuts_grouped = [pd.cut(self.grouped_nf[c + "0"], np.arange(0, s + bin_size, bin_size)) for c, s in zip("yx", self.shape)]
         filt = self.grouped_nf.groupby(cuts_grouped).size() < thresh
 
@@ -907,6 +908,11 @@ class PALMData(object):
         filtered_palm = self.drift_corrected_nf.groupby(cuts).filter(filt_func)
 
         return filtered_palm
+
+    def render(self, data_name, **kwargs):
+        """"""
+        data = getattr(self, data_name)
+        return gen_img(self.shape, data, **kwargs)
 
 
 class Data405(object):
@@ -1055,6 +1061,7 @@ class PALMExperiment(object):
             self.cached_data.index = self.time_idx
 
         self.output = dict()
+        self.diagnostics = False
 
     def __repr__(self):
         """A representation of this class"""
@@ -1665,8 +1672,12 @@ def _clear_zeros(a):
     return a[a > 0]
 
 
-def make_trace(f, max_frame):
-    return f.groupby("frame").size().reindex(np.arange(max_frame)).fillna(0).astype(int).values
+def make_trace(f, min_frame=None, max_frame=None):
+    if min_frame is None:
+        min_frame = f.frame.min()
+    if max_frame is None:
+        max_frame = f.frame.max()
+    return f.groupby("frame").size().reindex(np.arange(min_frame, max_frame + 1)).fillna(0).astype(int).values
 
 
 def on_off_times(trace, trim=False):
@@ -2017,7 +2028,7 @@ def plot_occurrences(samples_blinks, num=10, ax=None, return_all=False):
         fig = ax.get_figure()
 
     # find on frames
-    all_onframes = pd.concat([calc_onframes(s) for s in tqdm.tqdm(samples_blinks, desc="Getting on frames")], ignore_index=True)
+    all_onframes = pd.concat([calc_onframes(s) for s in tqdm.tqdm_notebook(samples_blinks, desc="Getting on frames")], ignore_index=True)
     # calculate the number of occurrences in each frame
     frames_and_occurrences = all_onframes.groupby(["occurrence", "frame"]).size()
 
@@ -2178,7 +2189,7 @@ def prune_blobs(df, radius):
         # indices of pruned blobs
         pruned_blobs = set()
         # loop through conflicts
-        for idx_a, idx_b in tqdm.tqdm(list_of_conflicts, desc="Removing conflicts"):
+        for idx_a, idx_b in tqdm.tqdm_notebook(list_of_conflicts, desc="Removing conflicts"):
             # see if we've already pruned one of the pair
             if (idx_a not in pruned_blobs) and (idx_b not in pruned_blobs):
                 # compare based on amplitude
@@ -2235,26 +2246,30 @@ def check_density(shape, data, mag, zscaling, thresh_func=thresholding.threshold
         event_density = max_thresh / frame_range
 
         if diagnostics:
-            fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(8 * nx / ny, 4))
+            fig, (ax0, ax1, ax2) = plt.subplots(1, 3, figsize=(3 * 4 * nx / ny, 4))
 
-            ax0.matshow(hist2d, norm=PowerNorm(0.5), vmax=max_thresh, cmap="Greys_r")
+            ax0.matshow(hist2d, vmax=max_thresh, cmap="Greys_r")
             ax0.set_title("Data")
-            ax1.matshow(hist2d, norm=PowerNorm(0.5), vmin=thresh, vmax=max_thresh, cmap=greys_limit)
-            ax0.set_title("Data and Thresholds")
+            ax1.matshow(hist2d, vmin=thresh, vmax=max_thresh, cmap=greys_limit)
+            ax1.set_title("Data and Thresholds")
+
+            for ax in (ax0, ax1):
+                ax.xaxis.set_major_locator(plt.NullLocator())
+                ax.yaxis.set_major_locator(plt.NullLocator())
 
             # plot of histogram
-            fig3, ax0 = plt.subplots(1)
-            ax0.hist(hist2d.ravel(), bins=np.logspace(1, np.log10(hist2d.max() + 10), 128), log=True, color="k")
-            ax0.set_xscale("log")
-            ax0.axvline(max_thresh, c="r", label="99% Thresh = {:g} # / area\n= {:g} # / area / frame".format(max_thresh, event_density))
-            ax0.axvline(thresh, c="b", label="{} = {:g} # / area".format(thresh_func.__name__, thresh))
-            ax0.legend()
-            ax0.set_title("Histogram of Histogram Values")
+            space_time_density = hist2d.ravel() / frame_range
+            bins = np.logspace(np.log10(space_time_density[space_time_density > 0].min() * 0.9), np.log10(space_time_density.max() * 1.1), 128)
 
-            # to_plot = hist2d[hist2d > 1]
-            # to_plot = to_plot[to_plot < max_thresh]
-            # ax1.hist(to_plot, bins=128, log=True, color="k")
-            fig3.tight_layout()
+            ax2.hist(space_time_density, bins=bins, density=True, log=True, color="k")
+            ax2.set_xscale("log")
+            ax2.axvline(event_density, c="r", label="99% Thresh = {:.3e}".format(event_density))
+            ax2.axvline(thresh / frame_range, c="b", label="{} = {:g}".format(thresh_func.__name__, thresh / frame_range))
+            ax2.legend()
+            ax2.set_title("Histogram of Local Densities")
+            ax2.set_xlabel("Space Time Event Density\n(# Events per unit space per unit time)")
+
+            fig.tight_layout()
 
         numerator = scale * event_density ** exponent
         if dim == 3:
@@ -2581,7 +2596,7 @@ def make_extract_fiducials_func(data):
     return extract_fiducials
 
 
-def test_point_cloud(df, *, drift=None, coords="xy", diagnostics=False):
+def test_point_cloud(df, *, drift=None, coords="xyz", diagnostics=False):
     """Test if point cloud is likely to have come from a single emitter by comparing
     the experimental distribution to an estimated distribution based on the experimentally
     determined localization precisions
@@ -2611,6 +2626,14 @@ def test_point_cloud(df, *, drift=None, coords="xy", diagnostics=False):
     # pull coordinates and sigmas
     x = [c + "0" for c in coords]
     s = ["sigma_" + c for c in coords]
+    
+    def weighted_mean(df):
+        """Weighted mean as defined here https://en.wikipedia.org/wiki/Weighted_arithmetic_mean#Statistical_properties"""
+        if len(df) == 1:
+            return df[x]
+        weights = 1 / df[s].values ** 2
+        new_coords = (df[x].values * weights).sum(0, keepdims=True) / weights.sum(0)
+        return pd.DataFrame(new_coords, columns=x)
 
     # get experimental parameters
     real_pos = df[x]
@@ -2623,14 +2646,14 @@ def test_point_cloud(df, *, drift=None, coords="xy", diagnostics=False):
         sigmas = np.sqrt(sigmas**2 + drift[x].values**2)
 
     # update positions based on localization precision
-    predicted_pos = predicted_pos * sigmas + real_pos.mean().values
+    predicted_pos = predicted_pos * sigmas + weighted_mean(df)[x].values
     predicted_pos = pd.DataFrame(predicted_pos, columns=real_pos.columns)
 
     # plots if requested
     if diagnostics:
         if coords == "xyz":
-            ax = real_pos.plot.scatter("x0", "y0", c="z0")
-            predicted_pos.plot.scatter("x0", "y0", c="z0", marker="x", ax=ax)
+            ax = real_pos.plot.scatter("x0", "y0", c="z0", cmap="gist_rainbow")
+            predicted_pos.plot.scatter("x0", "y0", c="z0", cmap="gist_rainbow", marker="x", ax=ax)
         else:
             ax = real_pos.plot.scatter("x0", "y0")
             predicted_pos.plot.scatter("x0", "y0", marker="x", ax=ax)
@@ -2655,7 +2678,7 @@ def get_onofftimes(samples, extract_radius, data=None, extract_fiducials=None, p
     if pvalue is not None:
         # keep if we cannot reject null hypothesis that they are singles
         logging.info("Filtering samples ...")
-        samples_blinks = [s for s in dask.delayed(samples_blinks).compute() if test_point_cloud(s, drift=drift) > pvalue]
+        samples_blinks = [s for s in dask.delayed(samples_blinks).compute() if test_point_cloud(s, drift=drift, coords="xyz") > pvalue]
     logging.info("Kept samples = {}%".format(int(len(samples_blinks) / n * 100)))
 
     # calculate on/off times
@@ -2829,10 +2852,11 @@ def hist_and_cumulative(data, ax=None, log=False):
         fig, ax = plt.subplots()
     else:
         fig = ax.get_figure()
+
     if log:
         bins = np.logspace(np.log10(data.min()), np.log10(data.max()), 64)
     else:
-        bins = np.linspace(data.min(), data.max(), 64)
+        bins = "auto"
     ax.hist(data, bins=bins, density=True, log=False, histtype="step")
     ax.set_ylabel("PDF")
     if log:
@@ -2849,7 +2873,7 @@ def hist_and_cumulative(data, ax=None, log=False):
     twin_ax.set_ylabel("CDF", color=color)
     twin_ax.set_ylim(bottom=0)
 
-    return fig, ax
+    return fig, (ax, twin_ax)
 
 
 def calc_onframes(df):
