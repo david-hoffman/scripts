@@ -19,6 +19,7 @@ import hashlib
 import tempfile
 import itertools as itt
 import dask
+from dask.diagnostics import ProgressBar
 # import our ability to read and write MRC files
 import Mrc
 
@@ -997,6 +998,8 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
     if return_code.stderr:
         logger.error(return_code.stderr.decode())
         logger.error(" ".join(exc_list))
+    else:
+        logger.debug(" ".join(exc_list))
     return return_code.stdout.decode('utf-8').split('\n')
 
 
@@ -1378,7 +1381,7 @@ def combine_img_with_padding_window(recon_split_data, padding,
         raise RuntimeError(
             "Unexpected data shape = {}".format(recon_split_data.shape))
     to_combine_data = np.zeros(newdata_shape, dtype=recon_split_data.dtype)
-    for i, d in tqdm.tqdm(enumerate(recon_split_data), "Recombining", num_tiles, False):
+    for i, d in tqdm.tqdm_notebook(enumerate(recon_split_data), "Recombining", num_tiles, False):
         current_tile, slices = extend_and_window_tile(
             d, padding * zoom, i, num_tiles, window_func=window_func
         )
@@ -1423,7 +1426,7 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     # make temp directory to work in
     with tempfile.TemporaryDirectory() as dir_name:
         # save split data
-        for i, data in tqdm.tqdm(enumerate(split_data), "Splitting and saving data", num_tiles, False):
+        for i, data in tqdm.tqdm_notebook(enumerate(split_data), "Splitting and saving data", num_tiles, False):
             # save subimages in sub folder, use sha as ID
             savepath = os.path.join(dir_name,
                                     'sub_image{:06d}_{}.mrc'.format(i, sha))
@@ -1438,7 +1441,7 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
         i_re = re.compile(r'(?<=sub_image)\d+')
         # process data
         sirecon_ouput = []
-        for path in tqdm.tqdm(glob.iglob(dir_name + '/sub_image*_{}.mrc'.format(sha)), "Processing tiles", num_tiles, False):
+        for path in tqdm.tqdm_notebook(glob.iglob(dir_name + '/sub_image*_{}.mrc'.format(sha)), "Processing tiles", num_tiles, False):
             # update the kwargs to have the input file.
             sim_kwargs.update({
                 'input_file': path,
@@ -1449,7 +1452,8 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
                 sim_kwargs['background'] = float(bgs[i])
             sirecon_ouput.append(dask.delayed(simrecon)(**sim_kwargs))
 
-        sirecon_ouput = list(itt.chain.from_iterable(dask.delayed(sirecon_ouput).compute()))
+        with ProgressBar():
+            sirecon_ouput = list(itt.chain.from_iterable(dask.delayed(sirecon_ouput).compute()))
         # read in processed data
         recon_split_data = np.array([
             Mrc.Mrc(path).data
