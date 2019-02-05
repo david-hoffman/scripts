@@ -637,12 +637,19 @@ class PALMData(object):
         self.drift_corrected = remove_drift(self.processed, self.drift)
         calc_fiducial_stats(self.drift_fiducials, diagnostics=self.diagnostics)
 
+    @cached_property
+    def group_radius(self):
+        """Calculate the grouping radius from the data"""
+        return estimate_grouping_radius(self.drift_corrected, zscaling=self.zscaling, drift=self.residual_drift)[0.99]
+
+    @cached_property
+    def zscaling(self):
+        """Calculate the z-scaling from the data"""
+        return calculate_zscaling(self.drift_corrected, diagnostics=self.diagnostics)
+
     def group(self):
         """group the drift corrected data"""
-        # get zscaling
-        self.zscaling = calculate_zscaling(self.drift_corrected, diagnostics=self.diagnostics)
-        # estimate grouping radius
-        self.group_radius = estimate_grouping_radius(self.drift_corrected, zscaling=self.zscaling)[0.99]
+        logger.info("Z-Scaling is being set to {:.3f}".format(self.zscaling))
         logger.info("Grouping radius is being set to {:.3f}".format(self.group_radius))
         # get gap function from density
         self.gap = check_density(self.shape, self.drift_corrected, 1, dim=3, zscaling=self.zscaling)
@@ -719,6 +726,16 @@ class PALMData(object):
         cimg = gen_img(self.shape, self.grouped_nf, mag=1, hist=True, cmap=None)
         thresh = thresholding.threshold_triangle(cimg)
         return cimg > thresh
+
+    @cached_property
+    def residual_drift(self):
+        """The residual drift"""
+        radius = estimate_grouping_radius(self.drift_corrected)[0.999]
+        logger.debug("Residual drift radius = {}".format(radius))
+        fid_df_list = extract_fiducials(self.drift_corrected, self.fiducials[:5], radius, diagnostics=self.diagnostics)
+        rd = calc_residual_drift(fid_df_list)
+        assert np.isfinite(rd).all(), "Residual is not finite {}".format(rd)
+        return rd
 
     def threshold(self, data="grouped_nf", mag=1):
         """Find a threshold that discriminates between biology and background"""
@@ -847,7 +864,7 @@ class PALMData(object):
 
         return fig, all_axs
 
-    def filter(self, filter_func=None, **kwargs):
+    def filter(self, filter_func=None, shift=False, **kwargs):
         """Filter internal DataFrames, if myfilter is dict, assume that it's
         maximum and minimums for each column, if it's a callable assume it
         takes a DataFrame and returns a DataFrame."""
@@ -858,16 +875,16 @@ class PALMData(object):
             if filter_func is not None:
                 df = filter_func(df)
 
-            filt_idx = pd.Series(data=np.ones(len(df), dtype=bool), index=df.index)
-
-            for k, v in kwargs.items():
-                vmin, vmax = v
-                filt_idx &= (vmin < df[k]) & (df[k] < vmax)
-
-            return df[filt_idx]
+            return crop(df, kwargs, shift=shift)
 
         to_filt = "processed", "drift_corrected", "grouped"
-        new_params = {"shape": self.shape, "drift": self.drift}
+        if shift:
+            y_range = float(np.diff(kwargs.get("y0", (0, self.shape[0]))))
+            x_range = float(np.diff(kwargs.get("x0", (0, self.shape[1]))))
+            shape = (y_range, x_range)
+        else:
+            shape = self.shape
+        new_params = {"shape": shape, "drift": self.drift}
 
         # apply the function to all interal dataframes.
         for param in to_filt:
@@ -1033,6 +1050,70 @@ def weird(xdata, *args):
     return res
 
 
+def masked_gen(masked_array):
+    """Return unmasked data as a generator along slowest axis"""
+    for data in masked_array:
+        yield data[np.isfinite(data)]
+
+
+def mode_single(data):
+    """mode of a single plane"""
+    return np.bincount(data.astype(int)).argmax()
+
+
+def mode(masked_array, **kwargs):
+    """Mode of a chunck"""
+    return np.array([mode_single(data) for data in masked_gen(masked_array)])
+
+
+def poisson_stats_single(data, snr):
+    """Calculate fraction of pixels above shot-noise floor"""
+    # calculate the mode of the data, this is the approximate background of the data
+    mode = mode_single(data[np.isfinite(data)])
+    # calculate how much data is above the noise floor (assuming and SNR of snr)
+    # we know the noise is the sqrt of the mean (poisson statistics)
+    # noise = scipy.stats.poisson.std(mode)
+    # the camera has an offset of 100, remove that before calculating the noise variance in electron noise is ~6
+    noise = np.sqrt(max(mode - 100.0, 0.0) + 6.0)
+    # make mask for identifying peaks
+    peak_mask = data > noise * snr + mode
+    # kill single pixels
+    peak_mask = ndi.binary_opening(peak_mask)
+    data_above_noise_floor = data[peak_mask]
+    # calculate the fraction of pixels above the noise floor
+    fraction_of_pixels_above_noise = data_above_noise_floor.size / data.size
+    # calculate the median value of pixels above noise.
+    median_above_noise = np.median(data_above_noise_floor)
+
+    lbls, nlbl = ndi.label(peak_mask)
+    try:
+        # What are the max values in each window
+        maxes = ndi.labeled_comprehension(data, lbls, np.arange(1, nlbl + 1), np.max, "uint16", 0)
+        # what's the median max value
+        median_max = np.median(maxes[maxes > 0])
+    except ValueError:
+        median_max = np.nan
+
+    try:
+        # make "fit" windows around each max value
+        win_size = 7
+        peak_windows = np.zeros(lbls.shape, dtype=bool)
+        row, col = np.asarray(ndi.maximum_position(data, lbls, np.arange(1, nlbl + 1))).T
+        peak_windows[row, col] = True
+        peak_windows = ndi.binary_dilation(peak_windows, np.ones((win_size, win_size), dtype=bool))
+        # find mean counts in peak window, background subtraction will have to be done later.
+        peaks = data[peak_windows]
+        mean_peak_counts = peaks[np.isfinite(peaks)].mean()
+    except ValueError:
+        mean_peak_counts = np.nan
+
+    return mode, median_above_noise, fraction_of_pixels_above_noise, median_max, mean_peak_counts
+
+
+def poisson_stats(masked_array, snr=2, **kwargs):
+    return np.array([poisson_stats_single(data, snr) for data in masked_array])
+
+
 class PALMExperiment(object):
     """A simple class to organize our experimental data"""
 
@@ -1089,7 +1170,7 @@ class PALMExperiment(object):
         self.activation.save(fname)
         self.cached_data.to_hdf(fname, "cached_data")
 
-    def masked_agg(self, masktype, agg_func=np.median, agg_args=(), agg_kwargs={}, prefilter=False):
+    def masked_agg(self, masktype, agg_func=np.median, agg_args=(), agg_kwargs={}, prefilter=False, names=None):
         """Mask and aggregate raw data along frame direction with agg_func
 
         Save results on RawImages object"""
@@ -1099,6 +1180,8 @@ class PALMExperiment(object):
         except AttributeError:
             logger.info("{} not found".format(agg_func))
 
+            assert hasattr(agg_func, "__call__"), "{} is not a function".format(agg_func)
+            
             def agg_func2(masked_array, *args, **kwargs):
                 array = np.ma.filled(masked_array, np.nan)
                 return agg_func(array, *args, **kwargs)
@@ -1163,7 +1246,17 @@ class PALMExperiment(object):
         if prefilter:
             attrname = attrname + "_prefilter"
         logger.info("Setting {}".format(attrname))
-        self.cached_data[attrname] = masked_result
+
+        if masked_result.ndim > 1:
+            if names is not None and len(names) == masked_result.shape[-1]:
+                names = [attrname + "_" + name for name in names]
+            else:
+                names = [attrname + str(i) for i in range(masked_result.shape[-1])]
+
+            for name, data in zip(names, masked_result.T):
+                self.cached_data[name] = data
+        else:
+            self.cached_data[attrname] = masked_result
 
         return masked_result
 
@@ -1192,6 +1285,42 @@ class PALMExperiment(object):
         save()
         self.masked_agg("background")
         save()
+
+    def calc_contrasts(self):
+        """Convenience function to calculate and save the usual masked aggregations."""
+        self.masked_agg("data",
+                        poisson_stats,
+                        names=[
+                            "mode",
+                            "median_above_noise",
+                            "fraction_of_pixels_above_noise",
+                            "median_max",
+                            "mean_peak_counts"
+                        ]
+                        )
+        self.masked_agg("background", mode)
+
+        # filter PALM to reasonable limits
+        palm = self.palm.filter(amp=(25, 6e4), sigma_x=(0, 0.5), sigma_y=(0, 0.5), width_x=(0, 1.5), width_y=(0, 1.5), sigma_z=(0, 500))
+        # remove fiducials
+        palm.dianostics = True
+        palm.fiducials = self.palm.fiducials
+        palm.remove_fiducials(10)
+        # limit data to where mitos are
+        palm2 = palm.spatial_filter(1, False)
+
+        SNR = palm2.assign(amp_snr=palm2.amp / palm2.offset, nphotons_snr=palm2.nphotons / palm2.offset).dropna()
+        SNR = SNR[SNR.offset > 0]
+
+        for s in ("amp", "nphotons"):
+            col = s + "_snr"
+            # remove gross outliers
+            snr = SNR[SNR[col] < SNR[col].quantile(0.99)].groupby("frame")[col].median()
+            # reindex
+            snr = snr.reindex(pd.RangeIndex(len(self.raw)))
+            snr.index = self.time_idx
+            # save
+            self.cached_data["masked_data_{}_contrast".format(s)] = snr
 
     def agg(self, agg_func=np.median):
         """Aggregate raw data along frame direction with agg_func"""
@@ -1501,6 +1630,87 @@ class PALMExperiment(object):
 
             # plot
             for d, label in zip((contrast, roll), ("Data", "Rolling Mean, 1000 Frames")):
+                d.plot(ax=ax_plot, label=label, zorder=2)
+                d.hist(bins=128, ax=ax_hist, orientation='horizontal', histtype="stepfilled", density=True)
+
+            med_pre = contrast.loc[:0].median()
+            med_post = contrast.loc[0:].median()
+
+            # save contrast data for further analysis
+            self.output[p] = {"pre": med_pre, "post": med_post}
+
+            # add anotation
+            ax_plot.hlines(med_pre, contrast.index.min(), 0, "C2", lw=2,
+                           label="Pre-activation {:.1f}".format(med_pre), zorder=3)
+            ax_plot.hlines(med_post, 0, contrast.index.max(), "C3", lw=2,
+                           label="Post-activation {:.1f}".format(med_post), zorder=3)
+
+            ax_hist.axhline(med_pre, color="C2", linewidth=2)
+            ax_hist.axhline(med_post, color="C3", linewidth=2)
+
+            ax_plot.set_title(titles[p])
+            ax_plot.legend()
+
+        fig.tight_layout()
+
+        return fig, axs
+
+    def plot_contrast2(self, s=slice(None), background="median"):
+        """Plot the various ways of calculating the contrast ratio"""
+        # data to use
+        titles = {
+            "masked_data_amax": "Masked Max / Masked Median",
+            "masked_data_nanpercentile": "Masked 99% / Masked Median",
+            "masked_data_poisson_stats_median_max": "Median Peak to Background",
+            "masked_data_poisson_stats_mean_peak_counts": "Mean Signal Above Background"
+        }
+
+        if background == "median":
+            bg = self.cached_data.masked_background_median.rolling(250, 0, True).mean()
+            intensity = (self.cached_data.masked_data_median.rolling(250, 0, True).mean() - bg)
+        elif background == "mode":
+            bg = self.cached_data.masked_background_mode.rolling(250, 0, True).mean()
+            intensity = (self.cached_data.masked_data_poisson_stats_mode.rolling(250, 0, True).mean() - bg)
+        else:
+            raise Exception
+        # make sure intensity doesn't go below 1, if intensity were zero then
+        # contrast ratio would be infinite and it would be very hard to tell
+        # the differences between fluorophores.
+
+        assert np.array_equal(self.cached_data.index, intensity.index)
+
+        # build data
+        data_dict = {}
+        roll_dict = {}
+        for p in titles:
+            try:
+                # pin numerator to positive
+                data_dict[p] = (self.cached_data[p] - bg) / intensity
+                roll_dict[p] = (self.cached_data[p].rolling(250, 0, True).mean() - bg) / intensity
+            except KeyError:
+                if "contrast" not in p:
+                    logger.info("Couldn't find {}".format(p))
+
+        # setup plot
+        num_d = len(data_dict)
+        fig, axs = plt.subplots(num_d, 2, sharex="col", sharey="row", gridspec_kw=dict(width_ratios=(3, 1)), figsize=(6, 3 * num_d))
+
+        # make plot
+        shared_hist = axs[0, 1].get_shared_x_axes()
+        for (ax_plot, ax_hist), (p, contrast) in zip(axs, sorted(data_dict.items())):
+            # trim data, sort first just in case
+            contrast = contrast.sort_index().loc[s]
+            # turn off sharing on the histograms
+            shared_hist.remove(ax_hist)
+            # turn off x ticking on histograms
+            ax_hist.xaxis.set_major_locator(plt.NullLocator())
+            ax_hist.xaxis.set_minor_locator(plt.NullLocator())
+
+            # calculate rolling mean
+            roll = roll_dict[p]
+
+            # plot
+            for d, label in zip((contrast, roll), ("Data", "Rolling Mean, 250 Frames")):
                 d.plot(ax=ax_plot, label=label, zorder=2)
                 d.hist(bins=128, ax=ax_hist, orientation='horizontal', histtype="stepfilled", density=True)
 
@@ -2662,7 +2872,7 @@ def test_point_cloud(df, *, drift=None, coords="xyz", diagnostics=False):
     return min(ks_2samp(real_pos[c], predicted_pos[c]).pvalue for c in x)
 
 
-def get_onofftimes(samples, extract_radius, data=None, extract_fiducials=None, prune_radius=2, pvalue=None, drift=None):
+def get_onofftimes(samples, extract_radius, data=None, extract_fiducials=None, prune_radius=1, pvalue=None, drift=None):
     """Calculate onofftimes from samples"""
     if extract_fiducials is None:
         if data is None:
@@ -2800,6 +3010,10 @@ def do_trace_analysis(palm_data, basetitle, samples, directory="./",
                 fig.tight_layout()
                 fig.savefig(directory + t + ".png", dpi=300, bbox_inches="tight")
                 results.to_csv(directory + t + ".csv")
+                pd.concat([s.assign(group_id=i) for i, s in enumerate(samples_blinks)]).to_hdf(directory + t + ".h5", "samples")
+                ontimes, offtimes = get_on_and_off_times(onofftimes)
+                pd.Series(ontimes, name="ontimes").to_hdf(directory + t + ".h5", "ontimes")
+                pd.Series(offtimes, name="offtimes").to_hdf(directory + t + ".h5", "offtimes")
             gc.collect()
 
 
@@ -2841,7 +3055,7 @@ def calc_onoff_ratio(onofftimes):
     ontimes, offtimes = get_on_and_off_times(onofftimes, clip=True)
     # ratio of on time to following off time
     ratio = ontimes / offtimes
-    # ratio2 is the total ontime for a molecule divided by total on time
+    # ratio2 is the total on time for a molecule divided by total off time
     ratio2 = np.array([b[0][:-1].sum() / b[1].sum() for b in onofftimes if b[1].sum() > 0])
     ratio2 = ratio2[np.isfinite(ratio2)]
     return ratio, ratio2
