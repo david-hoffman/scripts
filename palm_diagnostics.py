@@ -72,6 +72,8 @@ logger = logging.getLogger()
 
 # isoluminant colormaps
 colorcet.register_cmap("rainbow_bgyrm_35_85_c69", cmap=colorcet.cm.rainbow_bgyrm_35_85_c69)
+colorcet.register_cmap("rainbow", cmap=colorcet.cm.rainbow)
+colorcet.register_cmap("rainbow_r", cmap=colorcet.cm.rainbow_r)
 colorcet.register_cmap("isolum", cmap=colorcet.cm.isolum)
 colorcet.register_cmap("colorwheel", cmap=colorcet.cm.colorwheel)
 
@@ -656,7 +658,7 @@ class PALMData(object):
         # set up grouping gap
         self.group_gap = int(self.gap(self.group_radius, diagnostics=self.diagnostics))
         logger.info("Grouping gap is being set to {}".format(self.group_gap))
-        plt.show()
+        # plt.show()
         self.grouped = slab_grouper(
             [self.drift_corrected],
             radius=self.group_radius,
@@ -733,6 +735,8 @@ class PALMData(object):
         radius = estimate_grouping_radius(self.drift_corrected)[0.999]
         logger.debug("Residual drift radius = {}".format(radius))
         fid_df_list = extract_fiducials(self.drift_corrected, self.fiducials[:5], radius, diagnostics=self.diagnostics)
+        logger.debug("Residual drift z-radius = {}".format(radius * self.zscaling))
+        fid_df_list = clean_fiducials(fid_df_list, radius=radius, zradius=radius * self.zscaling)
         rd = calc_residual_drift(fid_df_list)
         assert np.isfinite(rd).all(), "Residual is not finite {}".format(rd)
         return rd
@@ -1169,6 +1173,47 @@ class PALMExperiment(object):
         self.palm.save(fname)
         self.activation.save(fname)
         self.cached_data.to_hdf(fname, "cached_data")
+
+    @cached_property
+    def drift_corrected_mean(self):
+        """Find the mean image after drift correction of raw data."""
+        # figure out how to split the drift to align with raw data
+        cut_points = np.append(0, self.raw.lengths).cumsum()
+
+        @dask.delayed
+        def shift_and_sum(chunk, chunked_shifts):
+            """Drift correct raw data sum and find counts per pixel to take mean later"""
+            # quick sanity check
+            assert len(chunk) == len(chunked_shifts), "Lengths don't match, {} != {}".format(chunk, chunked_shifts)
+
+            # convert image data to float
+            chunk = chunk.astype(float)
+
+            # drift correct the chunk
+            shifted_chunk = np.array([
+                # we're drift correcting the *data* so negative shifts
+                # fill with nan's so we can mask those off too.
+                ndi.shift(data, (-y, -x), order=1, cval=np.nan)
+                for data, (y, x) in zip(chunk, chunked_shifts)
+            ])
+
+            # return sum and and counts as (y, x, type) array
+            return np.dstack((np.nansum(shifted_chunk, axis=0), np.isfinite(shifted_chunk).sum(axis=0)))
+
+        # get x, y shifts from palm drift, interpolating missing values
+        shifts = self.palm.drift[["y0", "x0"]].reindex(pd.RangeIndex(len(self.raw))).interpolate("slinear", fill_value="extrapolate", limit_direction="both").values
+
+        # set up computation tree
+        to_compute = [
+            shift_and_sum(lazy_imread(path), shifts[cut_points[i]:cut_points[i + 1]])
+            for i, path in enumerate(self.raw.paths)
+        ]
+
+        # get intermediate sums and counts
+        result = np.asarray(dask.delayed(to_compute).compute())
+
+        # compute mean from intermediate results.
+        return result[..., 0].sum(0) / result[..., 1].sum(0)
 
     def masked_agg(self, masktype, agg_func=np.median, agg_args=(), agg_kwargs={}, prefilter=False, names=None):
         """Mask and aggregate raw data along frame direction with agg_func
