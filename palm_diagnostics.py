@@ -2978,7 +2978,7 @@ def plot_onofftimes(onofftimes, max_frame, axs=None, return_all=False):
 
     # add ratios to the plot with legend
     ax = axs[1, 0]
-    hist_and_cumulative(ratio, ax=ax, log=True)
+    dplt.hist_and_cumulative(ratio, ax=ax, log=True)
     ax.set_xlabel("Ratio of On Time to Off Time")
     ax.set_title("Dynamic Contrast Ratio")
     median = np.median(ratio)
@@ -3104,35 +3104,6 @@ def calc_onoff_ratio(onofftimes):
     ratio2 = np.array([b[0][:-1].sum() / b[1].sum() for b in onofftimes if b[1].sum() > 0])
     ratio2 = ratio2[np.isfinite(ratio2)]
     return ratio, ratio2
-
-
-def hist_and_cumulative(data, ax=None, log=False):
-    if ax is None:
-        fig, ax = plt.subplots()
-    else:
-        fig = ax.get_figure()
-
-    if log:
-        bins = np.logspace(np.log10(data.min()), np.log10(data.max()), 64)
-    else:
-        bins = "auto"
-    ax.hist(data, bins=bins, density=True, log=False, histtype="step")
-    ax.set_ylabel("PDF")
-    if log:
-        ax.set_xscale("log")
-
-    sorted_data = np.sort(data)
-    N = len(sorted_data)
-    b = np.arange(N) / N
-
-    twin_ax = ax.twinx()
-    color = ax._get_lines.get_next_color()
-    twin_ax.plot(sorted_data, b, color=color, ls="steps-mid")
-    twin_ax.tick_params(axis='y', labelcolor=color)
-    twin_ax.set_ylabel("CDF", color=color)
-    twin_ax.set_ylim(bottom=0)
-
-    return fig, (ax, twin_ax)
 
 
 def calc_onframes(df):
