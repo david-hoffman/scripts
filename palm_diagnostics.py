@@ -633,11 +633,13 @@ class PALMData(object):
 
         _, self.drift, _, self.drift_fiducials = remove_all_drift(
             self.processed[self.processed.sigma_z < sz],
-            self.shape, None, frames_index,
+            self.shape, frames_index=frames_index,
             **kwargs
         )
         self.drift_corrected = remove_drift(self.processed, self.drift)
-        calc_fiducial_stats(self.drift_fiducials, diagnostics=self.diagnostics)
+        if self.diagnostics:
+            # if we want output do it here
+            calc_fiducial_stats(self.drift_fiducials, diagnostics=self.diagnostics)
 
     @cached_property
     def group_radius(self):
@@ -697,13 +699,25 @@ class PALMData(object):
         self.make_fiducial_mask(radius)
 
     @classmethod
-    def load(cls, fname):
+    def load(cls, fname, save_list=None, **filter_kwds):
         """Load PALMData object from Pandas managed HDF container"""
         shape = tuple(pd.read_hdf(fname, "shape"))
         kwargs = {}
-        for obj in cls.save_list:
+
+
+        if save_list is None:
+            save_list = cls.save_list
+        
+        if filter_kwds:
+            filter_kwds = dict(where=build_query(filter_kwds))
+        
+        for obj in save_list:
             try:
-                kwargs[obj] = pd.read_hdf(fname, obj)
+                try:
+                    kwargs[obj] = pd.read_hdf(fname, obj, **filter_kwds)
+                except ValueError:
+                    kwargs[obj] = pd.read_hdf(fname, obj)
+                    logger.info("Query {where:} invalid for {obj:} in {fname:}".format(obj=obj, fname=fname, where=filter_kwds["where"]))
             except KeyError:
                 logger.info("Failed to find {} in {}".format(obj, fname))
                 continue
@@ -714,7 +728,8 @@ class PALMData(object):
         pd.Series(self.shape).to_hdf(fname, "shape")
         for obj in self.save_list:
             try:
-                getattr(self, obj).to_hdf(fname, obj)
+                # save columns in a format that can be queried on disk
+                getattr(self, obj).to_hdf(fname, obj, format="table", data_columns=True)
             except AttributeError:
                 logger.info("Failed to find {}".format(obj))
                 continue
@@ -1344,6 +1359,9 @@ class PALMExperiment(object):
                         ]
                         )
         self.masked_agg("background", mode)
+        self.masked_agg("fiducials")
+        self.masked_agg("background")
+        self.masked_agg("data")
 
         # filter PALM to reasonable limits
         palm = self.palm.filter(amp=(25, 6e4), sigma_x=(0, 0.5), sigma_y=(0, 0.5), width_x=(0, 1.5), width_y=(0, 1.5), sigma_z=(0, 500))
@@ -1815,19 +1833,22 @@ class PALMExperiment(object):
         """Convert the internal output variable to a nicely formated series"""
         output = self.output
         s = pd.Series()
-        s["A"], s["ka"], s["B"], s["kb"], s["offset"] = output["popt_decay"]
-        s["taua"], s["taub"] = 1 / s.ka, 1 / s.kb
+        try:
+            s["A"], s["ka"], s["B"], s["kb"], s["offset"] = output["popt_decay"]
+            s["taua"], s["taub"] = 1 / s.ka, 1 / s.kb
 
-        s["tau_react"] = 1 / output["popt_react"][1]
+            s["tau_react"] = 1 / output["popt_react"][1]
 
-        s["kDB"] = (s.B * s.ka + s.A * s.kb) / (s.A + s.B)
-        s["kBK"] = s.ka * s.kb / s.kDB
-        s["kBD"] = (s.A * s.B * (s.ka - s.kb)**2) / ((s.A + s.B) * (s.B * s.ka + s.A * s.kb))
+            s["kDB"] = (s.B * s.ka + s.A * s.kb) / (s.A + s.B)
+            s["kBK"] = s.ka * s.kb / s.kDB
+            s["kBD"] = (s.A * s.B * (s.ka - s.kb)**2) / ((s.A + s.B) * (s.B * s.ka + s.A * s.kb))
 
-        s["tauDB"], s["tauBK"], s["tauBD"] = 1 / s.kDB, 1 / s.kBK, 1 / s.kBD
+            s["tauDB"], s["tauBK"], s["tauBD"] = 1 / s.kDB, 1 / s.kBK, 1 / s.kBD
 
-        for k in ("set_point", "density", "density_median", "density_asymptote", "active_pixel_density"):
-            s[k] = output[k]
+            for k in ("set_point", "density", "density_median", "density_asymptote", "active_pixel_density"):
+                s[k] = output[k]
+        except KeyError:
+            pass
 
         keys = (
             'contrast',
@@ -1839,7 +1860,10 @@ class PALMExperiment(object):
         )
         for k in keys:
             for kk in ("pre", "post"):
-                s["{}_{}".format(k, kk)] = output[k][kk]
+                try:
+                    s["{}_{}".format(k, kk)] = output[k][kk]
+                except KeyError:
+                    pass
         return s
 
 

@@ -4,7 +4,7 @@
 """
 Convert from shitty amira format to clean format
 
-Copyright David Hoffman, 2018
+Copyright David Hoffman, 2019
 """
 
 import cv2
