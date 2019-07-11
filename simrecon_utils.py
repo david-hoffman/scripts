@@ -13,6 +13,7 @@ import re
 import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1 import ImageGrid
 # need subprocess to run commands
 import subprocess
 import hashlib
@@ -1189,11 +1190,12 @@ def split_img_with_padding(img, side, pad_width, mode='reflect'):
     # pad_img = fft_pad(img, nall + (pad_width + ny, pad_width + nx), mode)
     pad_img = fft_pad(img, (nz, pad_width + ny, pad_width + nx), mode)
     # split the image into padded sub-images
-    split_pad_img = np.array([pad_img[...,
-                                      j * side:pad_width + (j + 1) * side,
-                                      i * side:pad_width + (i + 1) * side]
-                              for i in range(nx // side)
-                              for j in range(nx // side)])
+    # don't use an array, so that we can be memory efficient
+    split_pad_img = [pad_img[...,
+                            j * side:pad_width + (j + 1) * side,
+                            i * side:pad_width + (i + 1) * side]
+                        for i in tqdm.tnrange(nx // side)
+                        for j in range(nx // side)]
     # return this
     return split_pad_img
 
@@ -1402,6 +1404,7 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     -------
     total_save_path, sirecon_ouput
     '''
+    assert tile_size >= padding, "Tile size must be smaller than padding"
     # make copy so internals don't change.
     sim_kwargs = sim_kwargs.copy()
     # save output name for later
@@ -1419,12 +1422,12 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     sim_kwargs['sha'] = sha
     # split the data
     split_data = split_img_with_padding(old_data, tile_size, padding)
-    num_tiles = split_data.shape[0]
+    num_tiles = len(split_data)
     # estimate background
     if bg_estimate:
         bgs = {}
     # make temp directory to work in
-    with tempfile.TemporaryDirectory() as dir_name:
+    with tempfile.TemporaryDirectory(dir="F:/") as dir_name:
         # save split data
         for i, data in tqdm.tqdm_notebook(enumerate(split_data), "Splitting and saving data", num_tiles, False):
             # save subimages in sub folder, use sha as ID
@@ -1496,53 +1499,99 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
 
 
 def process_txt_output(txt_buffer):
-    '''
-    Take out put from above and parse into angles
-    '''
-    # compile the regexes
+    """Take output from above and parse into angles"""
+    # ndirs is special
     ndir_re = re.compile(r'(?<=ndirs=)\d+', flags=re.M)
-    angle_re = re.compile(r'(?:amplitude:\n In.*)(?<=angle=)(-?\d+\.\d+)', flags=re.M)
-    mag_re = re.compile(r'(?:amplitude:\n In.*)(?<=mag=)(-?\d+\.\d+)', flags=re.M)
-    amp_re = re.compile(r'(?:amplitude:\n In.*)(?<=amp=)(-?\d+\.\d+)', flags=re.M)
-    phase_re = re.compile(r'(?:amplitude:\n In.*)(?<=phase=)(-?\d+\.\d+)', flags=re.M)
-    # parse output
     my_dirs = set(re.findall(ndir_re, txt_buffer))
-    assert len(my_dirs) == 1, my_dirs
-    ndirs = int(list(my_dirs)[0])
-    my_angles = np.array(re.findall(angle_re, txt_buffer)).astype(float)
-    my_mags = np.array(re.findall(mag_re, txt_buffer)).astype(float)
-    my_amps = np.array(re.findall(amp_re, txt_buffer)).astype(float)
-    my_phases = np.array(re.findall(phase_re, txt_buffer)).astype(float)
+    assert len(my_dirs) == 1, "my_dirs = {}".format(my_dirs)
+    ndirs = int(my_dirs.pop())
+    # compile the regexes
+    re_dict = dict(
+        angle=r'(?:amplitude:\n In.*)(?<=angle=)(-?\d+\.\d+)',
+        mag=r'(?:amplitude:\n In.*)(?<=mag=)(-?\d+\.\d+)',
+        amp=r'(?:amplitude:\n In.*)(?<=amp=)(-?\d+\.\d+)',
+        phase=r'(?:amplitude:\n In.*)(?<=phase=)(-?\d+\.\d+)',
+        ramp=r'(?:amplitude:\n In.*\n Reverse.*)(?<=amp=)(-?\d+\.\d+)',
+        camp=r'(?:amplitude:\n In.*\n.*\n Combined.*)(?<=amp=)(-?\d+\.\d+)',
+        ccoef=r'(?:amplitude:\n In.*\n.*\n.*\n Correlation.*)(-?\d+\.\d+)'
+    )
+    re_dict = {k: re.compile(v, flags=re.M) for k, v in re_dict.items()}
+    # parse output
+    parse_dict = {k: np.array(re.findall(v, txt_buffer)).astype(float) for k, v in re_dict.items()}
+    shapes = set(map(np.shape, parse_dict.values()))
     # find sizes
-    assert len(my_angles) == len(my_mags) == len(my_amps) == len(my_phases)
-    nx = ny = int(np.sqrt(len(my_angles) // ndirs))
-    assert len(my_angles) == nx * ny * ndirs, '{} == {} * {} * {}'.format(len(my_angles), ndirs, nx, ny)
+    assert len(shapes) == 1
+    length = shapes.pop()[0]
+    assert length != 0
+    nx = ny = int(np.sqrt(length // ndirs))
+    assert length == nx * ny * ndirs, '{} == {} * {} * {}'.format(length, ndirs, nx, ny)
     # reshape all
-    for data in (my_angles, my_mags, my_amps, my_phases):
-        data.shape = (ny, nx, ndirs)
-    # plot
-    return my_angles, my_mags, my_amps, my_phases
+    parse_dict = {k: v.reshape(nx, ny, ndirs) for k, v in parse_dict.items()}
+    parse_dict = {k: np.swapaxes(v, 0, -1) for k, v in parse_dict.items()}
+    return parse_dict
 
 
-def plot_params(angles, mags, amps, phases):
-    titles = ('Angles', 'Magnitudes', 'Amplitudes', 'Phase')
-    norients = angles.shape[-1]
-    fig, axs = plt.subplots(4, norients, figsize=(norients * 4, 4 * 4))
-    for row, data, t, c in zip(axs, (angles, mags, amps, phases), titles, ('viridis', 'viridis', 'viridis', 'seismic')):
-        for i, ax in enumerate(row):
-            # if angles we don't want absolute values.
-            if 'Angles' in t:
-                vmin = vmax = None
-            else:
-                vmin = data.min()
-                vmax = data.max()
-            # set the title for the middle row
-            if i == 1:
-                ax.set_title(t)
-            ax.matshow(np.flipud(data[..., i]), vmin=vmin, vmax=vmax, cmap=c)
-            ax.axis('off')
-    fig.tight_layout()
-    return fig, axs
+def plot_params(data_dict):
+    """Plot tiled SIM parameters
+    Angle, magnitude (spatial frequency in inverse microns), phase, modulation amplitude
+    First three define a wavevector
+    """
+    mapping = {
+        "angle": 'Pattern Angle',
+        "phase": 'Pattern Phase',
+        "mag": 'Pattern Spacing (µm)',
+        "amp": 'Modulation Amplitude',
+        "ccoef": 'Correlation Coefficient'
+    }
+
+    # set up figure
+    norients = len(data_dict["angle"])
+    nparams = len(mapping)
+    fig = plt.figure(dpi=150, figsize=(norients * 3, nparams * 3))
+    grid = ImageGrid(
+        fig,
+        111, 
+        nrows_ncols=(nparams, norients),
+        axes_pad=0.1,
+        cbar_mode="edge",
+        cbar_location="left",
+    )
+
+    keys = ("angle", "phase", "mag", "amp", "ccoef")
+
+    # plotting
+    for row, key, cbar in zip(grid.axes_row, keys, grid.cbar_axes):
+        # pull data
+        data = data_dict[key]
+        
+        if key == "mag":
+            # flip to line spacing
+            data = 1 / data
+        
+        # set up keywords
+        kwds = dict(vmin=data.min(), vmax=data.max(), cmap="inferno")
+        
+        # specialize
+        if "angle" == key:
+            kwds = dict()
+        elif "phase" == key:
+            kwds = dict(cmap="coolwarm")
+        
+        for ax, d in zip(row, data):
+            im = ax.matshow(d, **kwds)
+            ax.xaxis.set_major_locator(plt.NullLocator())
+            ax.yaxis.set_major_locator(plt.NullLocator())
+            if key == "angle":
+                ax.set_title("{:.1f} Degrees".format(np.rad2deg(np.median(d))))
+        
+        cbar.colorbar(im)
+        cbar.set_ylabel(mapping[key])
+        
+        if "angle" == key:
+            cbar.remove()
+            grid[0].set_ylabel(mapping[key])
+    
+    return fig, grid
 
 
 def stitch_img(infile, labelfile, outfile, num_threads=1):
