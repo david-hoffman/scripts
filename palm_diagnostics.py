@@ -642,17 +642,29 @@ class PALMData(object):
             calc_fiducial_stats(self.drift_fiducials, diagnostics=self.diagnostics)
 
     @cached_property
+    def group_radii(self):
+        """Calculate the grouping radius from the data"""
+        try:
+            self.fiducials_dfs
+            return estimate_grouping_radius(self.drift_corrected, zscaling=self.zscaling, drift=self.residual_drift)
+        except AttributeError:
+            logger.warn("No residual drift yet")
+            return estimate_grouping_radius(self.drift_corrected, zscaling=self.zscaling, drift=None)
+
+    @property
     def group_radius(self):
         """Calculate the grouping radius from the data"""
-        return estimate_grouping_radius(self.drift_corrected, zscaling=self.zscaling, drift=self.residual_drift)[0.99]
+        return self.group_radii[0.99]
 
     @cached_property
     def zscaling(self):
         """Calculate the z-scaling from the data"""
         return calculate_zscaling(self.drift_corrected, diagnostics=self.diagnostics)
 
-    def group(self):
-        """group the drift corrected data"""
+    def group(self, numthreads=os.cpu_count()):
+        """group the drift corrected data
+
+        May need to limit threads for memory"""
         logger.info("Z-Scaling is being set to {:.3f}".format(self.zscaling))
         logger.info("Grouping radius is being set to {:.3f}".format(self.group_radius))
         # get gap function from density
@@ -661,22 +673,31 @@ class PALMData(object):
         self.group_gap = int(self.gap(self.group_radius, diagnostics=self.diagnostics))
         logger.info("Grouping gap is being set to {}".format(self.group_gap))
         # plt.show()
+        for i in range(10):
+            gc.collect()
         self.grouped = slab_grouper(
             [self.drift_corrected],
             radius=self.group_radius,
             gap=self.group_gap,
             zscaling=self.zscaling,
-            numthreads=os.cpu_count()
+            numthreads=numthreads
         )[0]
 
     def find_fiducials(self, data="drift_corrected", **kwargs):
         """"""
         data = getattr(self, data)
         try:
-            self.fiducials = find_fiducials(data, self.shape, **kwargs)
+            fiducials = find_fiducials(data, self.shape, **kwargs)
         except RuntimeError as e:
             logger.error(e)
             self.fiducials = []
+        radius = max(0.5, self.group_radii[0.999])
+        fiducials_dfs = extract_fiducials(data, fiducials, radius, diagnostics=self.diagnostics)
+        self.fiducials_dfs = clean_fiducials(fiducials_dfs, radius=radius, zradius=radius * self.zscaling)
+
+        fiducials = pd.concat([df.agg({'x0': 'median', 'y0': 'median', 'z0': 'median', 'amp': 'count'}) for df in self.fiducials_dfs], axis=1).T
+        self.fiducials_agg = prune_blobs(fiducials, 10)
+        self.fiducials = self.fiducials_agg[["y0", "x0"]].values
         return self.fiducials
 
     @cached_property
@@ -710,9 +731,11 @@ class PALMData(object):
         
         if filter_kwds:
             filter_kwds = dict(where=build_query(filter_kwds))
+            logger.debug("Query = {where:}".format(**filter_kwds))
         
         for obj in save_list:
             try:
+                logger.debug("Loading {}".format(obj))
                 try:
                     kwargs[obj] = pd.read_hdf(fname, obj, **filter_kwds)
                 except ValueError:
@@ -728,8 +751,13 @@ class PALMData(object):
         pd.Series(self.shape).to_hdf(fname, "shape")
         for obj in self.save_list:
             try:
-                # save columns in a format that can be queried on disk
-                getattr(self, obj).to_hdf(fname, obj, format="table", data_columns=True)
+                # save columns in a format that can be queried on disk, (Only coordinates and precisions are queriable)
+                if obj != "drift":
+                    data_columns=True
+                else:
+                    data_columns=["x0", "y0", "z0", "sigma_x", "sigma_y", "sigma_z", "frame"]
+                getattr(self, obj).to_hdf(fname, obj, format="table", data_columns=data_columns)
+                logger.info("Saved {}".format(obj))
             except AttributeError:
                 logger.info("Failed to find {}".format(obj))
                 continue
@@ -747,12 +775,10 @@ class PALMData(object):
     @cached_property
     def residual_drift(self):
         """The residual drift"""
-        radius = estimate_grouping_radius(self.drift_corrected)[0.999]
-        logger.debug("Residual drift radius = {}".format(radius))
-        fid_df_list = extract_fiducials(self.drift_corrected, self.fiducials[:5], radius, diagnostics=self.diagnostics)
-        logger.debug("Residual drift z-radius = {}".format(radius * self.zscaling))
-        fid_df_list = clean_fiducials(fid_df_list, radius=radius, zradius=radius * self.zscaling)
-        rd = calc_residual_drift(fid_df_list)
+        self.fiducials
+        rd = calc_residual_drift(self.fiducials_dfs[:5])
+        # want to recalculate this for the future now that we have residual drift
+        del self.group_radii
         assert np.isfinite(rd).all(), "Residual is not finite {}".format(rd)
         return rd
 
@@ -951,6 +977,7 @@ class PALMData(object):
         return gen_img(self.shape, data, **kwargs)
 
 
+# TODO: need to refactor code so that load and save save data to HDF5
 class Data405(object):
     """An object encapsulating function's related to reactivation data"""
     try:
