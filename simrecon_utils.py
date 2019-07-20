@@ -1158,9 +1158,10 @@ def combine_img(img_stack):
         # extend array
         img_stack = img_stack[:, None]
     num_sub_imgs, zlen, ylen, xlen = img_stack.shape
-    divisor = int(np.sqrt(num_sub_imgs))
     assert xlen == ylen, '{} != {}'.format(xlen, ylen)
-    assert np.sqrt(num_sub_imgs) == divisor
+    sqrt_num_sub_imgs = np.sqrt(num_sub_imgs)
+    divisor = int(sqrt_num_sub_imgs)
+    assert sqrt_num_sub_imgs == divisor, "{} != {}".format(sqrt_num_sub_imgs, divisor)
 
     # move z to front
     img_stack = np.rollaxis(img_stack, 1)
@@ -1181,21 +1182,24 @@ def split_img_with_padding(img, side, pad_width, mode='reflect'):
     # nt, np, ny, nx waves
     # nall = img.shape[:-2]
     # ny, nx = img.shape[-2], img.shape[-1]
-    nz, ny, nx = img.shape
+    ny, nx = img.shape[-2:]
     # make sure the sides are equal
     assert nx == ny, "Sides are not equal, {} != {}".format(nx, ny)
     # make sure that side cleanly divides img dimensions
     assert nx % side == 0, "Sides are not mutltiples of tile size, {} % {} != 0".format(nx, side)
     # pad the whole image
     # pad_img = fft_pad(img, nall + (pad_width + ny, pad_width + nx), mode)
-    pad_img = fft_pad(img, (nz, pad_width + ny, pad_width + nx), mode)
+    assert pad_width % 2 == 0, "Pad width needs to be even"
+    half_pad = pad_width // 2
+    padding = ((0, 0),) * (img.ndim - 2) + ((half_pad, half_pad),) * 2
+    pad_img = np.pad(img, padding, mode)
     # split the image into padded sub-images
     # don't use an array, so that we can be memory efficient
     split_pad_img = [pad_img[...,
                             j * side:pad_width + (j + 1) * side,
                             i * side:pad_width + (i + 1) * side]
-                        for i in tqdm.tnrange(nx // side)
-                        for j in range(nx // side)]
+                        for j in tqdm.tnrange(ny // side)
+                        for i in range(nx // side)]
     # return this
     return split_pad_img
 
@@ -1306,63 +1310,51 @@ def extend_and_window_tile(tile, pad_size, tile_num, num_tiles,
     ytot = xtot = int(np.sqrt(num_tiles))
     assert ytot * xtot == num_tiles, "Image is not square!"
     # calculate the position of this tile
-    yn, xn = tile_num % ytot, tile_num // ytot
+    yn, xn = tile_num // ytot, tile_num % ytot
     # calculate the unpadded size of the tile (original tile size)
-    to_pad = (tile.shape[-1] - pad_size)
+    tile_size = tile.shape[-1]
+    to_pad = tile_size - pad_size
     # make y window and x window
     ywin = edge_window(to_pad - pad_size, pad_size, window_func=window_func)
-    xwin = edge_window(to_pad - pad_size, pad_size, window_func=window_func)
+    xwin = ywin.copy()
     # if the tile is on an edge, don't window the edge side(s)
     if yn == 0:
-        ywin[:pad_size * 2] = 1
+        ywin[:pad_size] = 1
     elif yn == ytot - 1:
-        ywin[-pad_size * 2:] = 1
+        ywin[-pad_size:] = 1
     if xn == 0:
-        xwin[:pad_size * 2] = 1
+        xwin[:pad_size] = 1
     elif xn == xtot - 1:
-        xwin[-pad_size * 2:] = 1
+        xwin[-pad_size:] = 1
     # generate the 2D window
     win_2d = ywin.reshape(-1, 1).dot(xwin.reshape(1, -1))
     # reshape window so that it works for 3D and for time
     # note that this still only tiles in 2D and not a full
     # 3D tiling.
     win_2d.shape = (1, ) * (tile.ndim - 2) + win_2d.shape
-    # return the windowed padded tile
-    # padding = (((0, 0),) * (tile.ndim - 2) +
-    #            ((ybefore, yafter), (xbefore, xafter)))
-    # print(padding)
-    # return np.pad(tile * win_2d, padding,
-    #               mode='constant', constant_values=0)
 
     # calculate the before and after padding for each direction
     ybefore = yn * to_pad
-    yafter = (ytot - yn - 1) * to_pad
+    yafter = ybefore + tile_size
     xbefore = xn * to_pad
-    xafter = (xtot - xn - 1) * to_pad
-    if xafter == 0:
-        xslice = slice(xbefore, None)
-    else:
-        xslice = slice(xbefore, -xafter)
-    # now y
-    if yafter == 0:
-        yslice = slice(ybefore, None)
-    else:
-        yslice = slice(ybefore, -yafter)
+    xafter = xbefore + tile_size
+    xslice = slice(xbefore, xafter)
+
+    yslice = slice(ybefore, yafter)
     slices = (Ellipsis, yslice, xslice)
     return tile * win_2d, slices
 
 
 def combine_img_with_padding(img_stack, pad_width):
-    '''
-    Reverse of split_img_with_padding
-    '''
-    assert pad_width % 2 == 0
+    '''Reverse of split_img_with_padding'''
+    if pad_width == 0:
+        return combine_img(img_stack)
+    assert pad_width % 2 == 0, "Padding must be even"
     half_pad = pad_width // 2
     return combine_img(img_stack[..., half_pad:-half_pad, half_pad:-half_pad])
 
 
-def combine_img_with_padding_window(recon_split_data, padding,
-                                    window_func=cosine_edge, zoom=1):
+def combine_img_with_padding_window(recon_split_data, padding, window_func=cosine_edge, zoom=1):
     """Combine a tile stack when there's padding and a window involved"""
     # get number of tiles
     num_tiles = recon_split_data.shape[0]
@@ -1373,6 +1365,7 @@ def combine_img_with_padding_window(recon_split_data, padding,
     newdata_shape *= int(np.sqrt(num_tiles))
     # then increasee by padding and potential zoom factor
     newdata_shape += padding * zoom
+    
     if recon_split_data.ndim == 4:
         # 3D data
         newdata_shape = recon_split_data.shape[1:2] + tuple(newdata_shape)
@@ -1380,23 +1373,23 @@ def combine_img_with_padding_window(recon_split_data, padding,
         # 2D data, don't do anything.
         pass
     else:
-        raise RuntimeError(
-            "Unexpected data shape = {}".format(recon_split_data.shape))
-    to_combine_data = np.zeros(newdata_shape, dtype=recon_split_data.dtype)
+        raise RuntimeError("Unexpected data shape = {}".format(recon_split_data.shape))
+    
+    to_combine_data = np.zeros(newdata_shape, dtype=float)
+    
     for i, d in tqdm.tqdm_notebook(enumerate(recon_split_data), "Recombining", num_tiles, False):
-        current_tile, slices = extend_and_window_tile(
-            d, padding * zoom, i, num_tiles, window_func=window_func
-        )
+        current_tile, slices = extend_and_window_tile(d, padding * zoom, i, num_tiles, window_func=window_func)
         to_combine_data[slices] += current_tile
+    
     # we need to get rid of the reflected bits
     edge_pix = (padding // 2) * zoom
     slc = slice(edge_pix, -edge_pix, None)
+    
     # cut them here.
     return to_combine_data[..., slc, slc]
 
 
-def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
-                            bg_estimate=None, window_func=cosine_edge):
+def split_process_recombine(fullpath, tile_size, padding, sim_kwargs, bg_estimate=None, window_func=cosine_edge):
     '''
     Method that splits then processes and then recombines images
 
@@ -1429,46 +1422,45 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
     # make temp directory to work in
     with tempfile.TemporaryDirectory(dir="F:/") as dir_name:
         # save split data
-        for i, data in tqdm.tqdm_notebook(enumerate(split_data), "Splitting and saving data", num_tiles, False):
+        sirecon_ouput = []
+        
+        @dask.delayed
+        def save_process(data, savepath, sim_kwargs):
+            Mrc.save(data, savepath, hdr=oldmrc.hdr, ifExists='overwrite')
+            return simrecon(**sim_kwargs)
+        
+        for i, data in enumerate(tqdm.tqdm_notebook(split_data, "Splitting and saving data")):
             # save subimages in sub folder, use sha as ID
             savepath = os.path.join(dir_name,
                                     'sub_image{:06d}_{}.mrc'.format(i, sha))
-            Mrc.save(data, savepath, hdr=oldmrc.hdr, ifExists='overwrite')
+            
             if bg_estimate == 'min':
                 bgs[i] = data.min()
             elif bg_estimate == 'median':
                 bgs[i] = np.median(data)
             elif bg_estimate == 'mode':
                 bgs[i] = np.argmax(np.bincount(data.ravel()))
-        # set up re
-        i_re = re.compile(r'(?<=sub_image)\d+')
-        # process data
-        sirecon_ouput = []
-        for path in tqdm.tqdm_notebook(glob.iglob(dir_name + '/sub_image*_{}.mrc'.format(sha)), "Processing tiles", num_tiles, False):
+
             # update the kwargs to have the input file.
             sim_kwargs.update({
-                'input_file': path,
-                'output_file': path.replace('.mrc', '_proc.mrc')
+                'input_file': savepath,
+                'output_file': savepath.replace('.mrc', '_proc.mrc')
             })
             if bg_estimate:
-                i = int(re.findall(i_re, path)[0])
                 sim_kwargs['background'] = float(bgs[i])
-            sirecon_ouput.append(dask.delayed(simrecon)(**sim_kwargs))
+
+            sirecon_ouput.append(save_process(data, savepath, sim_kwargs))
 
         with ProgressBar():
+            # process files
             sirecon_ouput = list(itt.chain.from_iterable(dask.delayed(sirecon_ouput).compute()))
         # read in processed data
-        recon_split_data = np.array([
-            Mrc.Mrc(path).data
-            for path in sorted(glob.glob(
-                dir_name + '/sub_image*_{}_proc.mrc'.format(sha))
-            )
-        ]).squeeze()
-        # recombine data, remember the data density is doubled so padding is
-        # too
-        if window_func is None:
-            recon_split_data_combine = combine_img_with_padding(
-                recon_split_data, padding * zoom)
+        processed_paths = sorted(glob.glob(dir_name + '/sub_image*_{}_proc.mrc'.format(sha)))
+        recon_split_data = np.array([Mrc.Mrc(path).data for path in tqdm.tqdm_notebook(processed_paths, "Reading back processed")]).squeeze()
+        # recombine data
+        if window_func is None or padding == 0:
+            #remember the data density is doubled so padding is too
+            recon_split_data_combine = combine_img_with_padding(recon_split_data, padding * zoom)
         else:
             to_combine_data = combine_img_with_padding_window(
                 recon_split_data, padding, window_func, zoom)
@@ -1480,7 +1472,7 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs,
             assert newy == oldy * zoom, "Y-dim: {} != {}".format(newy, oldy * zoom)
         # save data
         # path is the last tile we read in, it has all the relevant metadata
-        temp_mrc = Mrc.Mrc(path.replace('.mrc', '_proc.mrc'))
+        temp_mrc = Mrc.Mrc(processed_paths[-1])
         extension = "_tile{}_pad{}.mrc".format(tile_size, padding)
         total_save_path = outname.replace(
             '.mrc', extension)
@@ -1575,7 +1567,7 @@ def plot_params(data_dict):
         if "angle" == key:
             kwds = dict()
         elif "phase" == key:
-            kwds = dict(cmap="coolwarm")
+            kwds = dict(vmin=data.min(), vmax=data.max(), cmap="coolwarm")
         
         for ax, d in zip(row, data):
             im = ax.matshow(d, **kwds)
