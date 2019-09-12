@@ -1171,9 +1171,7 @@ def combine_img(img_stack):
 
 
 def split_img_with_padding(img, side, pad_width, mode='reflect'):
-    '''
-    Split SIM stack into sub-stacks with padding of pad_width
-    '''
+    '''Split SIM stack into sub-stacks with padding of pad_width'''
     # if no padding revert to simpler function.
     if pad_width == 0:
         return split_img(img, side)
@@ -1456,35 +1454,52 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs, bg_estimat
             sirecon_ouput = list(itt.chain.from_iterable(dask.delayed(sirecon_ouput).compute()))
         # read in processed data
         processed_paths = sorted(glob.glob(dir_name + '/sub_image*_{}_proc.mrc'.format(sha)))
-        recon_split_data = np.array([Mrc.Mrc(path).data for path in tqdm.tqdm_notebook(processed_paths, "Reading back processed")]).squeeze()
+        
+        @dask.delayed
+        def safe_read(path):
+            '''Catch errors for threaded read'''
+            try:
+                return Mrc.Mrc(path).data
+            except ValueError:
+                return None
+
+        # read in data
+        recon_split_data = dask.compute(*[safe_read(path) for path in processed_paths])
+        valid_paths = [p for d, p in zip(recon_split_data, processed_paths) if d is not None]
+        
+        # Check all shapes
+        all_shapes = set(map(np.shape, filter(lambda x: x is not None, recon_split_data)))
+        if len(all_shapes) != 1:
+            raise RuntimeError("Processing failed, not all shapes the same")
+
+        shape = all_shapes.pop()
+
         # recombine data
+        recon_split_data = np.asarray([d if d is not None else np.zeros(shape, dtype='float32') for d in recon_split_data]).squeeze()
         if window_func is None or padding == 0:
             #remember the data density is doubled so padding is too
             recon_split_data_combine = combine_img_with_padding(recon_split_data, padding * zoom)
         else:
-            to_combine_data = combine_img_with_padding_window(
-                recon_split_data, padding, window_func, zoom)
+            to_combine_data = combine_img_with_padding_window(recon_split_data, padding, window_func, zoom)
             recon_split_data_combine = to_combine_data.astype(np.float32)
             # make sure the new data is the right shape
             oldy, oldx = old_data.shape[-2:]
             newy, newx = recon_split_data_combine.shape[-2:]
             assert newx == oldx * zoom, "X-dim: {} != {}".format(newx, oldx * zoom)
             assert newy == oldy * zoom, "Y-dim: {} != {}".format(newy, oldy * zoom)
+        
         # save data
         # path is the last tile we read in, it has all the relevant metadata
-        temp_mrc = Mrc.Mrc(processed_paths[-1])
+        temp_mrc = Mrc.Mrc(valid_paths[-1])
         extension = "_tile{}_pad{}.mrc".format(tile_size, padding)
-        total_save_path = outname.replace(
-            '.mrc', extension)
-        Mrc.save(recon_split_data_combine,
-                 os.path.abspath(total_save_path),
-                 hdr=temp_mrc.hdr,
-                 ifExists='overwrite')
+        total_save_path = outname.replace('.mrc', extension)
+        Mrc.save(recon_split_data_combine, os.path.abspath(total_save_path), hdr=temp_mrc.hdr, ifExists='overwrite')
         # clean up
         oldmrc.close()
         del oldmrc
         temp_mrc.close()
         del temp_mrc
+    
     # directory is killed automatically.
 
     return total_save_path, sirecon_ouput
@@ -1512,7 +1527,7 @@ def process_txt_output(txt_buffer):
     parse_dict = {k: np.array(re.findall(v, txt_buffer)).astype(float) for k, v in re_dict.items()}
     shapes = set(map(np.shape, parse_dict.values()))
     # find sizes
-    assert len(shapes) == 1
+    assert len(shapes) == 1, "Shapes = {}".format(shapes)
     length = shapes.pop()[0]
     assert length != 0
     nx = ny = int(np.sqrt(length // ndirs))
