@@ -19,11 +19,11 @@ from dphplotting import display_grid
 # gc once they've been used
 
 
-def find_paths(home='.', key='SIM'):
-    '''
+def find_paths(home=".", key="SIM"):
+    """
     Utility function to return path names of folders
     whose name match key, starting at home
-    '''
+    """
     # walk the directory starting a root
     for dirpath, dirnames, fnames in os.walk(home):
         # if SIM in the path then kill root and return directory
@@ -33,15 +33,14 @@ def find_paths(home='.', key='SIM'):
 
 
 def better_imread(fname):
-    '''Small utility to side step OME parsing error.'''
+    """Small utility to side step OME parsing error."""
     root, ext = os.path.splitext(fname)
     if not ext:
         warnings.warn("File {} not working".format(fname))
         return None
     if ext == ".tif":
         with tif.TiffFile(fname) as mytif:
-            data = np.squeeze(np.array([page.asarray()
-                                        for page in mytif.pages]))
+            data = np.squeeze(np.array([page.asarray() for page in mytif.pages]))
     elif ext == ".mrc":
         data = np.squeeze(np.array(Mrc.Mrc(fname).data))
     else:
@@ -59,61 +58,61 @@ def better_imread(fname):
 
 
 def load_data(dirname, key):
-    '''Function to load all specified data matching glob into a dict
+    """Function to load all specified data matching glob into a dict
     and return the dict
-    '''
-    return {fname: better_imread(fname)
-            for fname in glob.iglob(dirname + os.path.sep + key, recursive=True)}
+    """
+    return {
+        fname: better_imread(fname)
+        for fname in glob.iglob(dirname + os.path.sep + key, recursive=True)
+    }
 
 
 def clean_dirname(dirname, figsize):
-    '''
+    """
     We only want the last two entries of dirname
 
     Filename and folder name
 
     and we want to clean those as well
-    '''
+    """
     path = dirname.split(os.path.sep)
-    fontsize = mpl.rcParams['font.size']
+    fontsize = mpl.rcParams["font.size"]
     # 1/120 = inches/(fontsize*character)
     num_chars = int(figsize / fontsize * 100)
     foldername = textwrap.fill(path[-2], num_chars)
     filename = textwrap.fill(path[-1], num_chars)
-    return foldername + '\n' + filename
+    return foldername + "\n" + filename
 
 
-def gen_thumbs(dirname, key='/*/*decon.tif', where='host', level=2, figsize=6,
-               redo=True, gamma=1.0, **kwargs):
-    '''
+def gen_thumbs(
+    dirname, key="/*/*decon.tif", where="host", level=2, figsize=6, redo=True, gamma=1.0, **kwargs
+):
+    """
     Main function to generate and save thumbnail pngs
-    '''
+    """
     # load data
     # can clean the dirnames here
     foldername = os.path.abspath(dirname).split(os.path.sep)[-level]
-    if where == 'host':
-        save_name = 'Thumbs ' + foldername + '.png'
-    elif where == 'in folder':
-        save_name = os.path.abspath(
-            os.path.join(dirname, 'Thumbs ' + foldername + '.png'))
+    if where == "host":
+        save_name = "Thumbs " + foldername + ".png"
+    elif where == "in folder":
+        save_name = os.path.abspath(os.path.join(dirname, "Thumbs " + foldername + ".png"))
     else:
-        save_name = os.path.abspath(
-            os.path.join(where, 'Thumbs ' + foldername + '.png'))
+        save_name = os.path.abspath(os.path.join(where, "Thumbs " + foldername + ".png"))
     if not redo and os.path.exists(save_name):
         print(save_name, "already exists, skipping")
         return dirname + os.path.sep + key
-    print('Gathering data for', dirname, key, 'on', os.getpid(), '...')
+    print("Gathering data for", dirname, key, "on", os.getpid(), "...")
     data = load_data(dirname, key)
     if data:
-        data = {clean_dirname(k, figsize): adjust_gamma(abs(v), gamma)
-                for k, v in data.items()}
+        data = {clean_dirname(k, figsize): adjust_gamma(abs(v), gamma) for k, v in data.items()}
         fig, ax = display_grid(data, figsize=figsize, **kwargs)
         # make the layout 'tight'
         fig.tight_layout()
         # save the figure
-        print('Saving', save_name, '...')
-        fig.savefig(save_name, bbox_inches='tight')
-        print('finished saving', save_name)
+        print("Saving", save_name, "...")
+        fig.savefig(save_name, bbox_inches="tight")
+        print("finished saving", save_name)
     else:
         print("No data in", dirname + key)
     # mark data for gc
@@ -121,43 +120,45 @@ def gen_thumbs(dirname, key='/*/*decon.tif', where='host', level=2, figsize=6,
     return dirname + os.path.sep + key
 
 
-def gen_all_thumbs(home=".", path_key='SIM', **kwargs):
-    '''Generate all thumbs'''
+def gen_all_thumbs(home=".", path_key="SIM", **kwargs):
+    """Generate all thumbs"""
     with mp.Pool() as pool:
         # spread jobs over processors.
-        results = [pool.apply_async(
-            gen_thumbs, args=(path,), kwds=kwargs
-        ) for path in find_paths(home, path_key)]
+        results = [
+            pool.apply_async(gen_thumbs, args=(path,), kwds=kwargs)
+            for path in find_paths(home, path_key)
+        ]
         for pp in results:
             # workers take care of output so nothing needs to be saved
             pp.get()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # This would be a good place to try out click
     import click
 
     @click.command()
-    @click.option("--home", default=".",
-                  help="Home folder to start the search")
-    @click.option("--key", default="/*/*decon.tif",
-                  help="Key to choose images")
-    @click.option("--path_key", default="SIM",
-                  help="Key to choose image folders")
-    @click.option("--where", default="host", help=" ".join(
-        ['Where do you want to save the',
-         'images? Use "host" to save them in the home folder, use "in folder"',
-         'to save them where the images are. Or you can pass a path.']
-    ))
+    @click.option("--home", default=".", help="Home folder to start the search")
+    @click.option("--key", default="/*/*decon.tif", help="Key to choose images")
+    @click.option("--path_key", default="SIM", help="Key to choose image folders")
+    @click.option(
+        "--where",
+        default="host",
+        help=" ".join(
+            [
+                "Where do you want to save the",
+                'images? Use "host" to save them in the home folder, use "in folder"',
+                "to save them where the images are. Or you can pass a path.",
+            ]
+        ),
+    )
     @click.option("--level", default=2, help="Level at which to make title")
     @click.option("--figsize", default=6, help="Subimage size in inches")
     @click.option("--redo", is_flag=True, help="Redo existing images")
     @click.option("--gamma", default=1.0, help="Gamma adjustment factor")
     @click.option("--cmap", default="inferno", help="MPL registered colormap")
-    @click.option("--auto", is_flag=True,
-                  help="Automatically determine color levels")
-    def update_kwds(home, key, path_key, where, level, figsize, redo, gamma,
-                    cmap, auto):
+    @click.option("--auto", is_flag=True, help="Automatically determine color levels")
+    def update_kwds(home, key, path_key, where, level, figsize, redo, gamma, cmap, auto):
         """A CLI to make thumbnail images of folders of images
         """
         default_kwds = {
@@ -170,7 +171,7 @@ if __name__ == '__main__':
             "redo": redo,
             "gamma": gamma,
             "cmap": cmap,
-            "auto": auto
+            "auto": auto,
         }
         click.echo("{: >10} ---> {}".format("Option", "Value"))
         click.echo("+" * 25)

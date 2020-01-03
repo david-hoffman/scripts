@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 from dphplotting.mip import mip
 
 # check to see if we're being run from the command line
-if __name__=='__main__':
+if __name__ == "__main__":
     # if we want to update this to take more arguments we'll need to use one of the
     # argument parsing packages
 
@@ -28,29 +28,31 @@ if __name__=='__main__':
     arg = docopt(__doc__)
 
     # a little output so that the user knows whats going on
-    print('Running mip on', arg['<myfile>'])
+    print("Running mip on", arg["<myfile>"])
 
     # Need to take the first system argument as the filename for a TIF file
 
     # test if filename has tiff in it
-    filename = arg['<myfile>']
+    filename = arg["<myfile>"]
 
     # try our main block
     try:
-        if '.tif' in filename or '.tiff' in filename:
+        if ".tif" in filename or ".tiff" in filename:
             # Import skimage so we have access to tiff loading
             from skimage.external import tifffile as tif
+
             # here's the real danger zone, did the user give us a real file?
             try:
                 data = tif.imread(filename)
             except FileNotFoundError as er:
                 raise er
-            if arg['--log']:
+            if arg["--log"]:
                 import numpy as np
+
                 if data.min() > 0:
                     data = np.log(data)
                 else:
-                    print(filename, 'had negative numbers, log not taken')
+                    print(filename, "had negative numbers, log not taken")
 
             # Trying to set the cmap here opens a new figure window
             # need to set up kwargs for efficient argument passing
@@ -63,8 +65,8 @@ if __name__=='__main__':
             fig.suptitle(filename, fontsize=16)
 
             # check to see if we should make a PDF
-            if arg['--PDF']:
-                fig.savefig(filename.replace('.tiff', '.pdf').replace('.tif', '.pdf'))
+            if arg["--PDF"]:
+                fig.savefig(filename.replace(".tiff", ".pdf").replace(".tif", ".pdf"))
             else:
                 # I still don't know why fig.show() doesn't work
                 # I think it has something to do with pyplot's backend
@@ -72,7 +74,7 @@ if __name__=='__main__':
         else:
             # this is our own baby error handling, it avoids loading the
             # skimage package
-            print('You didn\'t give me a TIFF')
+            print("You didn't give me a TIFF")
 
     except Exception as er:
         print(er)

@@ -20,10 +20,7 @@ def send_job_done(recipient, sub):
 def get_qstat(user="hoffmand"):
     """Get qstat for user"""
     process = subprocess.run(
-        ["qstat", "-u", user],
-        shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
+        ["qstat", "-u", user], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
     if process.stderr:
         raise RuntimeError(process.stderr.decode())
@@ -36,7 +33,7 @@ def get_status_bjobs(user="hoffmand", jobkey="Group"):
         "bjobs -u {} -J *{}*".format(user, jobkey),
         shell=True,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
+        stderr=subprocess.PIPE,
     )
     if process.stderr:
         # print(process.stderr.decode())
@@ -84,13 +81,13 @@ def watcher(jobkey, user, recipient, subject, poletime, status_getter):
 
 
 @click.command()
-@click.option('--jobkey', default="Group", help="Argument to pass to qsub's -j option")
-@click.option('--user', default=None, help="The user who's jobs are running")
-@click.option('--recipient', default=None, help="The recipient's email address")
-@click.option('--subject', default=None, help="The subject line of the email")
-@click.option('--poletime', default=60, help="Time between poles for (in seconds)")
-@click.option('--bsub', 'queue', flag_value=get_status_bjobs, default=True)
-@click.option('--qsub', 'queue', flag_value=get_status)
+@click.option("--jobkey", default="Group", help="Argument to pass to qsub's -j option")
+@click.option("--user", default=None, help="The user who's jobs are running")
+@click.option("--recipient", default=None, help="The recipient's email address")
+@click.option("--subject", default=None, help="The subject line of the email")
+@click.option("--poletime", default=60, help="Time between poles for (in seconds)")
+@click.option("--bsub", "queue", flag_value=get_status_bjobs, default=True)
+@click.option("--qsub", "queue", flag_value=get_status)
 def cli(jobkey, user, recipient, subject, poletime, queue):
     """The thing that does work"""
     if subject is None:
@@ -108,5 +105,5 @@ def cli(jobkey, user, recipient, subject, poletime, queue):
     watcher(jobkey, user, recipient, subject, poletime, queue)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     cli()

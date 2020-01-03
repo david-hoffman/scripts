@@ -46,7 +46,7 @@ label_base = "LABEL_Labels {{ byte strings }} @{:d}"
 def _normalize_str(s):
     """Does nothing now, will remove invalid characters in the future"""
     # need to add something for clashes
-    return ''.join(ch for ch in s if ch.isalnum())
+    return "".join(ch for ch in s if ch.isalnum())
 
 
 def pack_column(data, num, name):
@@ -80,7 +80,9 @@ def export_mesh(fname, dataframe, xyz_col=["x0", "y0", "z0"], label_cols=[], id_
         num_points=len(dataframe),
         num_labels=len(label_cols),
         # normalize symbols
-        symbols=",\n            ".join(['C{:03d} "{}"'.format(i, _normalize_str(s)) for i, s in enumerate(data_col)])
+        symbols=",\n            ".join(
+            ['C{:03d} "{}"'.format(i, _normalize_str(s)) for i, s in enumerate(data_col)]
+        ),
     )
 
     start_of_data = 3

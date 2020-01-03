@@ -9,19 +9,24 @@ Copyright (c) 2018, David Hoffman
 import itertools
 import numpy as np
 from dphutils import slice_maker
+
 # three different registration packages
 # not dft based
 import cv2
+
 # dft based
 from skimage.feature import register_translation as register_translation_base
 from skimage.transform import warp
 from skimage.transform import AffineTransform as AffineTransformBase
+
 try:
     import pyfftw
+
     pyfftw.interfaces.cache.enable()
     from pyfftw.interfaces.numpy_fft import fft2, ifft2, fftshift
 except ImportError:
     from numpy.fft import fft2, ifft2, fftshift
+
 
 class AffineTransform(AffineTransformBase):
     """Only adding matrix multiply to previous class"""
@@ -41,10 +46,15 @@ class AffineTransform(AffineTransformBase):
         return self.params.__repr__()
 
     def __str__(self):
-        string = ("<AffineTransform: translation = {}, rotation ={:.2f},"
-                  " scale = {}, shear = {:.2f}>")
-        return string.format(np.round(self.translation, 2), np.rad2deg(self.rotation),
-                      np.round(np.array(self.scale), 2), np.rad2deg(self.shear))
+        string = (
+            "<AffineTransform: translation = {}, rotation ={:.2f}," " scale = {}, shear = {:.2f}>"
+        )
+        return string.format(
+            np.round(self.translation, 2),
+            np.rad2deg(self.rotation),
+            np.round(np.array(self.scale), 2),
+            np.rad2deg(self.shear),
+        )
 
 
 AffineTransform.__init__.__doc__ = AffineTransformBase.__init__.__doc__
@@ -98,8 +108,9 @@ def highpass(shape):
     """Return highpass filter to be multiplied with fourier transform."""
     # inverse cosine filter.
     x = np.outer(
-        np.cos(np.linspace(-np.pi/2., np.pi/2., shape[0])),
-        np.cos(np.linspace(-np.pi/2., np.pi/2., shape[1])))
+        np.cos(np.linspace(-np.pi / 2.0, np.pi / 2.0, shape[0])),
+        np.cos(np.linspace(-np.pi / 2.0, np.pi / 2.0, shape[1])),
+    )
     return (1.0 - x) * (2.0 - x)
 
 
@@ -210,7 +221,7 @@ def similarity(im0, im1):
     h = highpass(f0.shape)
     f0 *= h
     f1 *= h
-#     del h
+    #     del h
     # convert images to logpolar coordinates.
     f0, log_base = logpolar(f0)
     f1, log_base = logpolar(f1)
@@ -271,15 +282,14 @@ def _convert_for_cv(im0):
 
 
 warp_dict = dict(
-        homography=cv2.MOTION_HOMOGRAPHY,
-        affine=cv2.MOTION_AFFINE,
-        euclidean=cv2.MOTION_EUCLIDEAN,
-        translation=cv2.MOTION_TRANSLATION
-    )
+    homography=cv2.MOTION_HOMOGRAPHY,
+    affine=cv2.MOTION_AFFINE,
+    euclidean=cv2.MOTION_EUCLIDEAN,
+    translation=cv2.MOTION_TRANSLATION,
+)
 
 
-def register_ECC(im0, im1, warp_mode="affine",
-                 num_iter=500, term_eps=1e-6):
+def register_ECC(im0, im1, warp_mode="affine", num_iter=500, term_eps=1e-6):
     """Register im1 to im0 using findTransformECC from OpenCV
 
     Parameters
@@ -358,7 +368,7 @@ def propogate_transforms(transforms, normalize=False):
     return new_transforms
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     import click
     import os
     import warnings
@@ -368,12 +378,26 @@ if __name__ == '__main__':
     from dask.diagnostics import ProgressBar
 
     @click.command()
-    @click.option('--directory', '-d', multiple=True, type=click.Path(exists=True, file_okay=False),
-        help='Directory containing data')
-    @click.option('--transform-type', '-t', default="translation",
-        help="Transformation type. Available options are: \n-" + "\n-".join(sorted(warp_dict.keys())))
-    @click.option("--combine-dirs", "-c", is_flag=True,
-        help="If TRUE will treat multiple directories as single data set")
+    @click.option(
+        "--directory",
+        "-d",
+        multiple=True,
+        type=click.Path(exists=True, file_okay=False),
+        help="Directory containing data",
+    )
+    @click.option(
+        "--transform-type",
+        "-t",
+        default="translation",
+        help="Transformation type. Available options are: \n-"
+        + "\n-".join(sorted(warp_dict.keys())),
+    )
+    @click.option(
+        "--combine-dirs",
+        "-c",
+        is_flag=True,
+        help="If TRUE will treat multiple directories as single data set",
+    )
     def cli(directory, transform_type, combine_dirs):
         """Register images within a folder
 
@@ -386,7 +410,7 @@ if __name__ == '__main__':
         # iterate through directories
         all_images = []
         all_names = []
-        
+
         for d in directory:
             click.echo("Registering *.tif images in {}".format(os.path.abspath(d)))
             # add trailing slash
@@ -396,10 +420,9 @@ if __name__ == '__main__':
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 with ProgressBar():
-                    images = dask.delayed([
-                        dask.delayed(tif.imread)(path)
-                        for path in sorted(glob.glob(d + "*.tif"))
-                    ]).compute()
+                    images = dask.delayed(
+                        [dask.delayed(tif.imread)(path) for path in sorted(glob.glob(d + "*.tif"))]
+                    ).compute()
             if not combine_dirs:
                 register_save(images, transform_type, resultname)
             else:
@@ -410,21 +433,24 @@ if __name__ == '__main__':
             click.echo()
             register_save(all_images, transform_type, " ".join(all_names))
 
-
     def register_save(images, transform_type, resultname):
         click.echo("Computing transforms ...")
         with ProgressBar():
-            transforms = dask.delayed([
-                dask.delayed(register_ECC)(images[i], images[i+1], transform_type)
-                for i in range(len(images)-1)
-            ]).compute()
+            transforms = dask.delayed(
+                [
+                    dask.delayed(register_ECC)(images[i], images[i + 1], transform_type)
+                    for i in range(len(images) - 1)
+                ]
+            ).compute()
 
         click.echo("Warping images ...")
         with ProgressBar():
-            images_reg = dask.delayed([
-                dask.delayed(cv_warp)(im, af)
-                for im, af in zip(images, propogate_transforms(transforms, normalize=True))
-            ]).compute()
+            images_reg = dask.delayed(
+                [
+                    dask.delayed(cv_warp)(im, af)
+                    for im, af in zip(images, propogate_transforms(transforms, normalize=True))
+                ]
+            ).compute()
 
         resultname += ".tif"
         click.echo("Saving results in {}".format(resultname))

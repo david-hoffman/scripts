@@ -4,6 +4,7 @@ from nose.tools import *
 import numpy as np
 import simrecon_utils as su
 from Mrc import Mrc
+
 # from skimage.data import astronaut
 # from skimage.color import rgb2gray
 from numpy.testing import assert_array_equal, assert_allclose
@@ -41,7 +42,7 @@ def test_img_split_combine2():
     """Testing that the split and combine functions work properly with
     real data"""
 
-    data_path = os.path.join('fixtures', '488 nm SIM 0.80_cam1_0.mrc')
+    data_path = os.path.join("fixtures", "488 nm SIM 0.80_cam1_0.mrc")
     data = Mrc(data_path).data
 
     # split data 4 ways and then take mean along second dimension
@@ -63,15 +64,15 @@ class TestBlendCombine(unittest.TestCase):
         self.pad_size = 32
         self.tile_size = 64
         # split the data
-        self.split_data = su.split_img_with_padding(
-            self.data, self.tile_size, self.pad_size)
+        self.split_data = su.split_img_with_padding(self.data, self.tile_size, self.pad_size)
 
     def test_split_cosine(self):
         """Testing the blended cosine"""
         pad_size = self.pad_size
         split_data = self.split_data
         recombine_data = su.combine_img_with_padding_window(
-            split_data, pad_size, window_func=su.cosine_edge, zoom=1)
+            split_data, pad_size, window_func=su.cosine_edge, zoom=1
+        )
         assert_allclose(self.data, recombine_data)
 
     def test_split_linear(self):
@@ -79,5 +80,6 @@ class TestBlendCombine(unittest.TestCase):
         pad_size = self.pad_size
         split_data = self.split_data
         recombine_data = su.combine_img_with_padding_window(
-            split_data, pad_size, window_func=su.linear_edge, zoom=1)
+            split_data, pad_size, window_func=su.linear_edge, zoom=1
+        )
         assert_allclose(self.data, recombine_data)

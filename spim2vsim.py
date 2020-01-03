@@ -11,6 +11,7 @@ import glob
 import re
 import numpy as np
 import skimage.external.tifffile as tif
+
 # import our ability to read and write MRC files
 import Mrc
 import warnings
@@ -18,6 +19,7 @@ import warnings
 # import click to run as script
 import click
 import logging
+
 
 def rearrange_spim_data(data, dz=1):
     """Assumes data with 4 dimensions
@@ -54,32 +56,32 @@ def get_center_wavlength(emission_filter):
     razor_edge_wl_re = re.compile(r"(\d+)(?=(?:\s*nm)?(?:\s*)?Razor Edge)")
     band_pass_re = re.compile(r"(\d+)\/(\d+)")
     short_pass_re = re.compile(r"(\d+)(?:\s*nm\s*)")
-    
+
     razor_edge = razor_edge_wl_re.findall(emission_filter)
     band_pass = band_pass_re.findall(emission_filter)
     short_pass = short_pass_re.findall(emission_filter)
-    
+
     try:
         short_side = int(razor_edge[0])
     except IndexError:
         short_side = np.nan
-        
+
     try:
         bandcenter, bandwidth = np.array(band_pass[0], float)
     except IndexError:
         bandcenter, bandwidth = np.nan, np.nan
-    
+
     band_short = bandcenter - bandwidth / 2
     band_long = bandcenter + bandwidth / 2
-    
+
     try:
         long_side = int(short_pass[0])
     except IndexError:
         long_side = np.nan
-        
+
     short_side = np.nanmin((short_side, band_short))
     long_side = np.nanmin((long_side, band_long))
-    
+
     return np.nanmean((short_side, long_side))
 
 
@@ -99,8 +101,15 @@ def parse_settings(path):
     emission_filter, laser, power, exposure
     cwl = get_center_wavlength(emission_filter)
 
-    return dict(z0=float(z0), dz=float(dz), nz=int(nz), exposure=float(exposure),
-                power=float(power), laser=int(laser), center_wl=cwl)
+    return dict(
+        z0=float(z0),
+        dz=float(dz),
+        nz=int(nz),
+        exposure=float(exposure),
+        power=float(power),
+        laser=int(laser),
+        center_wl=cwl,
+    )
 
 
 def save_mrc(path, data, wl, dz, dr=0.13, **kwargs):
@@ -114,7 +123,7 @@ def save_mrc(path, data, wl, dz, dr=0.13, **kwargs):
     header.NumWaves = 1
     # set dimensions
     header.d = dr, dr, dz
-    Mrc.save(data, path, hdr=header, ifExists='overwrite', **kwargs)
+    Mrc.save(data, path, hdr=header, ifExists="overwrite", **kwargs)
 
 
 def spim2vsim(path_or_basename):
@@ -131,7 +140,9 @@ def spim2vsim(path_or_basename):
         # we assume there's only one settings file in the path
         settings_files = glob.glob(os.path.join(path_or_basename, "*_Settings.txt"))
         logging.debug("Found these settings files {}".format(settings_files))
-        assert len(settings_files) == 1, "There were {} settings files, please check names".format(len(settings_files))
+        assert len(settings_files) == 1, "There were {} settings files, please check names".format(
+            len(settings_files)
+        )
         settings = parse_settings(settings_files[0])
         # change base name to better suit naming
         basename += os.path.basename(os.path.dirname(basename))
@@ -151,7 +162,9 @@ def spim2vsim(path_or_basename):
     num_channels = data.shape[0]
     # we assume only three orientaions
     # at most each channel has one activation channel two
-    assert num_channels % num_orientations == 0 and num_channels // num_orientations < 3, "data shape = {} doesn't make sense".format(data.shape)
+    assert (
+        num_channels % num_orientations == 0 and num_channels // num_orientations < 3
+    ), "data shape = {} doesn't make sense".format(data.shape)
     if num_channels // num_orientations > 1:
         # there was activation performed
         logging.info("Activation was used in this run")
@@ -167,9 +180,12 @@ def spim2vsim(path_or_basename):
     save_mrc(basename + ".mrc", vsim_data, settings["center_wl"], abs(settings["dz"]))
     logging.info("done with {}".format(path_or_basename))
 
+
 @click.command()
-@click.option('--path', '-p', multiple=True, type=click.Path(), help='Top level directory or basename')
-@click.option('-v', '--verbose', count=True, default=0)
+@click.option(
+    "--path", "-p", multiple=True, type=click.Path(), help="Top level directory or basename"
+)
+@click.option("-v", "--verbose", count=True, default=0)
 def main(path, verbose):
     """Convert SPIM SIM data to VSIM like .mrc files for processing"""
     # set output verbosity
@@ -178,5 +194,6 @@ def main(path, verbose):
     for p in path:
         spim2vsim(p)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

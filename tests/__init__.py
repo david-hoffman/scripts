@@ -1,6 +1,6 @@
-'''
+"""
 Tests for random scripts
-'''
+"""
 
 import unittest
 from nose.tools import *
@@ -10,9 +10,9 @@ import numpy as np
 
 
 class InitializationTests(unittest.TestCase):
-    '''
+    """
     Initialization Tests for simrecon_utils
-    '''
+    """
 
     def test_initialization(self):
         """
@@ -34,7 +34,9 @@ def _test_trace(trace):
     """Sub test for making sure our peak_width measurement matches what it should"""
     peak_width_sum = measure_peak_widths(trace).sum()
     total_nonzero = np.nonzero(trace)[0].size
-    assert peak_width_sum == total_nonzero, "{} != {}, Trace is {}".format(peak_width_sum, total_nonzero, trace)
+    assert peak_width_sum == total_nonzero, "{} != {}, Trace is {}".format(
+        peak_width_sum, total_nonzero, trace
+    )
 
 
 def test_measure_peak_widths():

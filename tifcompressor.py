@@ -26,15 +26,22 @@ def compress(path, compression):
 
 
 @click.command()
-@click.argument("src", type=click.Path(exists=True, file_okay=False,
-                                       readable=True, allow_dash=False))
-@click.option("--compression", "-c", default=6, type=click.IntRange(0, 9),
-              help=("Values from 0 to 9 controlling the level of zlib compression."
-              "If 0, data are written uncompressed (default). Compression cannot be"
-              "used to write contiguous files. If 'lzma', LZMA compression is used,"
-              "which is not available on all platforms."))
-@click.option("--recursive", "-r", is_flag=True,
-              help="Recursively search SRC for tifs")
+@click.argument(
+    "src", type=click.Path(exists=True, file_okay=False, readable=True, allow_dash=False)
+)
+@click.option(
+    "--compression",
+    "-c",
+    default=6,
+    type=click.IntRange(0, 9),
+    help=(
+        "Values from 0 to 9 controlling the level of zlib compression."
+        "If 0, data are written uncompressed (default). Compression cannot be"
+        "used to write contiguous files. If 'lzma', LZMA compression is used,"
+        "which is not available on all platforms."
+    ),
+)
+@click.option("--recursive", "-r", is_flag=True, help="Recursively search SRC for tifs")
 def cli(src, compression, recursive):
     """Compress the tif files in dir by compression amount.
     """
@@ -44,7 +51,9 @@ def cli(src, compression, recursive):
         globpat = "/**" + globpat
     click.echo("Searching for files in {} ... ".format(os.path.abspath(src) + globpat))
 
-    to_compute = dask.delayed([compress(path, compression) for path in glob.iglob(src + globpat, recursive=recursive)])
+    to_compute = dask.delayed(
+        [compress(path, compression) for path in glob.iglob(src + globpat, recursive=recursive)]
+    )
     # click.echo("found {} files".format(len(to_compute)))
     # do the computation.
     to_compute.compute(get=dask.multiprocessing.get)

@@ -55,11 +55,20 @@ def cm_to_amira(cmap, filename, extra=""):
         fp.write("\n".join(str_cmap))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     qualitative = {
-        'Pastel1', 'Pastel2', 'Paired', 'Accent',
-        'Dark2', 'Set1', 'Set2', 'Set3',
-        'tab10', 'tab20', 'tab20b', 'tab20c'
+        "Pastel1",
+        "Pastel2",
+        "Paired",
+        "Accent",
+        "Dark2",
+        "Set1",
+        "Set2",
+        "Set3",
+        "tab10",
+        "tab20",
+        "tab20b",
+        "tab20c",
     }
 
     for cmap_name, cmap in matplotlib.cm.cmap_d.items():
@@ -74,4 +83,3 @@ if __name__ == '__main__':
     for cmap_name, cmap in colorcet.cm.items():
         cm_to_amira(cmap, "colormaps/" + cmap_name, extra="")
         print(cmap_name)
-

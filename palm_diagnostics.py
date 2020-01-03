@@ -15,6 +15,7 @@ import datetime
 import re
 import numpy as np
 import pandas as pd
+
 # regular plotting
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm, PowerNorm, ListedColormap
@@ -80,8 +81,8 @@ colorcet.register_cmap("colorwheel", cmap=colorcet.cm.colorwheel)
 greys_alpha_cm = ListedColormap([(i / 255,) * 3 + ((255 - i) / 255,) for i in range(256)])
 
 greys_limit = copy(plt.cm.Greys_r)
-greys_limit.set_over('r', 1.0)
-greys_limit.set_under('b', 1.0)
+greys_limit.set_over("r", 1.0)
+greys_limit.set_under("b", 1.0)
 
 
 def peakselector_df(path, verbose=False):
@@ -91,7 +92,9 @@ def peakselector_df(path, verbose=False):
     sav = readsav(path, verbose=verbose)
     # pull out cgroupparams, set the byteorder to native and set the rownames
     # sav["totalrawdata"] has the raw data, we can use this to get dimensions.
-    df = pd.DataFrame(sav["cgroupparams"].byteswap().newbyteorder(), columns=sav["rownames"].astype(str))
+    df = pd.DataFrame(
+        sav["cgroupparams"].byteswap().newbyteorder(), columns=sav["rownames"].astype(str)
+    )
     return df, sav["totalrawdata"].shape
 
 
@@ -132,7 +135,14 @@ def filter_fiducials(df, blobs, radius, zradius=None):
         else:
             y, x = zyx
         if zradius:
-            bead_filter = np.sqrt(((df.x0 - x) / radius) ** 2 + ((df.y0 - y) / radius) ** 2 + ((df.z0 - z) / zradius) ** 2) > 1
+            bead_filter = (
+                np.sqrt(
+                    ((df.x0 - x) / radius) ** 2
+                    + ((df.y0 - y) / radius) ** 2
+                    + ((df.z0 - z) / zradius) ** 2
+                )
+                > 1
+            )
         else:
             bead_filter = np.sqrt((df.x0 - x) ** 2 + (df.y0 - y) ** 2) > radius
         blob_filt &= bead_filter
@@ -185,7 +195,7 @@ class cached_property(object):
         """
 
     def __init__(self, func):
-        self.__doc__ = getattr(func, '__doc__')
+        self.__doc__ = getattr(func, "__doc__")
         self.func = func
 
     def __get__(self, obj, cls):
@@ -287,13 +297,13 @@ def _get_labview_metadata(txtfile):
     rx_dict = {
         "date": re.compile(r"(?<=Date :\t).+"),
         "num_imgs": re.compile(r"(?<=# of Imgs :\t)\d+"),
-        "time_delta": re.compile(r"(?<=Cycle\(s\) :\t)\d+\.\d+")
+        "time_delta": re.compile(r"(?<=Cycle\(s\) :\t)\d+\.\d+"),
     }
 
     process_dict = {
-        "date": lambda x: np.datetime64(datetime.datetime.strptime(x, '%m/%d/%Y %I:%M:%S %p')),
+        "date": lambda x: np.datetime64(datetime.datetime.strptime(x, "%m/%d/%Y %I:%M:%S %p")),
         "num_imgs": int,
-        "time_delta": lambda x: np.timedelta64(int(1e6 * float(x)), "us")
+        "time_delta": lambda x: np.timedelta64(int(1e6 * float(x)), "us"),
     }
 
     with open(txtfile, "r") as f:
@@ -310,7 +320,9 @@ def make_lazy_data(paths, tif_info):
     """Make a lazy data array from a set of paths to data
 
     Assumes all data is of same shape and type."""
-    data = [dask.array.from_delayed(lazy_imread(path), **info) for info, path in zip(tif_info, paths)]
+    data = [
+        dask.array.from_delayed(lazy_imread(path), **info) for info, path in zip(tif_info, paths)
+    ]
     data_array = dask.array.concatenate(data)
     return data_array
 
@@ -326,8 +338,7 @@ class RawImages(object):
 
         # generate time stamps for each image
         times = [
-            np.arange(meta["shape"][0]) * meta["time_delta"] + meta["date"]
-            for meta in metadata
+            np.arange(meta["shape"][0]) * meta["time_delta"] + meta["date"] for meta in metadata
         ]
 
         def one_zeros(n):
@@ -339,22 +350,21 @@ class RawImages(object):
         self.first_frames = np.concatenate([one_zeros(meta["shape"][0]) for meta in metadata])
 
         # generate an index
-        self.date_idx = pd.DatetimeIndex(
-            data=np.concatenate(times),
-            name="Timestamp"
-        )
+        self.date_idx = pd.DatetimeIndex(data=np.concatenate(times), name="Timestamp")
 
         if not self.date_idx.is_monotonic:
             logger.warning("Raw data's time index isn't monotonic")
 
-        assert len(self.date_idx) == len(self.raw), "Date index and Raw data don't match, {}, {}".format(self.date_idx, self.raw)
+        assert len(self.date_idx) == len(
+            self.raw
+        ), "Date index and Raw data don't match, {}, {}".format(self.date_idx, self.raw)
 
     def __repr__(self):
         """"""
         return (
-            "RawImages:\n" +
-            "   paths: {} ... {}\n".format(self.paths[0], self.paths[-1]) +
-            "   Timestamps: {} ... {}".format(self.date_idx[0], self.date_idx[-1])
+            "RawImages:\n"
+            + "   paths: {} ... {}\n".format(self.paths[0], self.paths[-1])
+            + "   Timestamps: {} ... {}".format(self.date_idx[0], self.date_idx[-1])
         )
 
     @classmethod
@@ -396,10 +406,7 @@ class RawImages(object):
 
     def save(self, fname):
         """Dump everything into a pandas managed HDF5 container"""
-        save_dict = dict(
-            metadata=pd.DataFrame(self.metadata),
-            paths=pd.Series(self.paths)
-        )
+        save_dict = dict(metadata=pd.DataFrame(self.metadata), paths=pd.Series(self.paths))
         for k, v in save_dict.items():
             v.to_hdf(fname, k)
 
@@ -467,7 +474,7 @@ def auto_z(palm_df, min_dist=0, max_dist=np.inf, nbins=128, diagnostics=False):
     # order minima according to distance from max
     i = np.diff(np.sign((z[concave] - max_z))).argmax()
     # the two closest are our best bets
-    z_mins = z[concave[i:i + 2]]
+    z_mins = z[concave[i : i + 2]]
     # enforce limits
     z_mins_min = np.array((-max_dist, min_dist)) + max_z
     z_mins_max = np.array((-min_dist, max_dist)) + max_z
@@ -482,6 +489,7 @@ def auto_z(palm_df, min_dist=0, max_dist=np.inf, nbins=128, diagnostics=False):
 
 class PALMData(object):
     """A simple class to manipulate peakselector data"""
+
     # columns we want to keep
 
     save_list = "processed", "drift", "drift_corrected", "grouped"
@@ -507,13 +515,16 @@ class PALMData(object):
             internal_params.append((name, attr is not None))
             if attr is not None and name != "drift":
                 temp = attr.columns
-        return ("PALMData with shape = {}\n".format(self.shape) +
-                "\n".join(["{} ---> {}".format(k, v) for k, v in internal_params]) +
-                "\nColumns ---> {}".format(temp)
-                )
+        return (
+            "PALMData with shape = {}\n".format(self.shape)
+            + "\n".join(["{} ---> {}".format(k, v) for k, v in internal_params])
+            + "\nColumns ---> {}".format(temp)
+        )
 
     @classmethod
-    def load_sav(cls, path_to_sav, verbose=False, processed_only=True, include_width=False, iPALM=False):
+    def load_sav(
+        cls, path_to_sav, verbose=False, processed_only=True, include_width=False, iPALM=False
+    ):
         """To initialize the experiment we need to know where the raw data is
         and where the peakselector processed data is
 
@@ -551,54 +562,49 @@ class PALMData(object):
         # add gaussian widths
 
         peak_col = {
-            'X Position': "x0",
-            'Y Position': "y0",
-            '6 N Photons': "nphotons",
-            'Frame Number': "frame",
-            'Sigma X Pos Full': "sigma_x",
-            'Sigma Y Pos Full': "sigma_y",
-            'Sigma Z': "sigma_z",
-            'Z Position': 'z0',
-            'Offset': 'offset',
-            'Amplitude': 'amp',
-            'ChiSquared': "chi2"
+            "X Position": "x0",
+            "Y Position": "y0",
+            "6 N Photons": "nphotons",
+            "Frame Number": "frame",
+            "Sigma X Pos Full": "sigma_x",
+            "Sigma Y Pos Full": "sigma_y",
+            "Sigma Z": "sigma_z",
+            "Z Position": "z0",
+            "Offset": "offset",
+            "Amplitude": "amp",
+            "ChiSquared": "chi2",
         }
 
         if include_width:
-            peak_col.update(
-                {
-                    'X Peak Width': "width_x",
-                    'Y Peak Width': "width_y",
-                }
-            )
+            peak_col.update({"X Peak Width": "width_x", "Y Peak Width": "width_y"})
 
         if iPALM:
-            peak_col.pop('Z Position')
-            peak_col['Unwrapped Z'] = 'z0'
-            peak_col['Unwrapped Z Error'] = "z0_e"
+            peak_col.pop("Z Position")
+            peak_col["Unwrapped Z"] = "z0"
+            peak_col["Unwrapped Z Error"] = "z0_e"
 
         group_col = {
-            'Frame Number': 'frame',
-            'Group X Position': 'x0',
-            'Group Y Position': 'y0',
-            'Group Sigma X Pos': 'sigma_x',
-            'Group Sigma Y Pos': 'sigma_y',
-            'Sigma Z': "sigma_z",
-            'Group N Photons': 'nphotons',
-            '24 Group Size': 'groupsize',
-            'Group Z Position': 'z0',
-            'Offset': 'offset',
-            'Amplitude': 'amp',
-            'ChiSquared': "chi2"
+            "Frame Number": "frame",
+            "Group X Position": "x0",
+            "Group Y Position": "y0",
+            "Group Sigma X Pos": "sigma_x",
+            "Group Sigma Y Pos": "sigma_y",
+            "Sigma Z": "sigma_z",
+            "Group N Photons": "nphotons",
+            "24 Group Size": "groupsize",
+            "Group Z Position": "z0",
+            "Offset": "offset",
+            "Amplitude": "amp",
+            "ChiSquared": "chi2",
         }
 
         # load peakselector data
         raw_df, shape = peakselector_df(path_to_sav, verbose=verbose)
         # don't discard label column if it's being used
-        int_cols = ['frame']
+        int_cols = ["frame"]
         if raw_df["Label Set"].unique().size > 1:
             d = {"Label Set": "label"}
-            int_cols += ['label']
+            int_cols += ["label"]
             peak_col.update(d)
             group_col.update(d)
         # convert to float
@@ -608,7 +614,7 @@ class PALMData(object):
         processed[int_cols] = processed[int_cols].astype(int)
 
         if not processed_only:
-            int_cols += ['groupsize']
+            int_cols += ["groupsize"]
             grouped = grouped_peaks(raw_df)[list(group_col.keys())].astype(float)
             grouped = grouped.rename(columns=group_col)
             grouped[int_cols] = grouped[int_cols].astype(int)
@@ -627,13 +633,16 @@ class PALMData(object):
 
         all_frames indicates whether you want the frames initialized or not."""
         if all_frames:
-            frames_index = pd.RangeIndex(self.processed.frame.min(), self.processed.frame.max() + 1, name="frame")
+            frames_index = pd.RangeIndex(
+                self.processed.frame.min(), self.processed.frame.max() + 1, name="frame"
+            )
         else:
             frames_index = None
 
         _, self.drift, _, self.drift_fiducials = remove_all_drift(
             self.processed[self.processed.sigma_z < sz],
-            self.shape, frames_index=frames_index,
+            self.shape,
+            frames_index=frames_index,
             **kwargs
         )
         self.drift_corrected = remove_drift(self.processed, self.drift)
@@ -646,10 +655,14 @@ class PALMData(object):
         """Calculate the grouping radius from the data"""
         try:
             self.fiducials_dfs
-            return estimate_grouping_radius(self.drift_corrected, zscaling=self.zscaling, drift=self.residual_drift)
+            return estimate_grouping_radius(
+                self.drift_corrected, zscaling=self.zscaling, drift=self.residual_drift
+            )
         except AttributeError:
             logger.warn("No residual drift yet")
-            return estimate_grouping_radius(self.drift_corrected, zscaling=self.zscaling, drift=None)
+            return estimate_grouping_radius(
+                self.drift_corrected, zscaling=self.zscaling, drift=None
+            )
 
     @property
     def group_radius(self):
@@ -668,7 +681,9 @@ class PALMData(object):
         logger.info("Z-Scaling is being set to {:.3f}".format(self.zscaling))
         logger.info("Grouping radius is being set to {:.3f}".format(self.group_radius))
         # get gap function from density
-        self.gap = check_density(self.shape, self.drift_corrected, 1, dim=3, zscaling=self.zscaling)
+        self.gap = check_density(
+            self.shape, self.drift_corrected, 1, dim=3, zscaling=self.zscaling
+        )
         # set up grouping gap
         self.group_gap = int(self.gap(self.group_radius, diagnostics=self.diagnostics))
         logger.info("Grouping gap is being set to {}".format(self.group_gap))
@@ -680,7 +695,7 @@ class PALMData(object):
             radius=self.group_radius,
             gap=self.group_gap,
             zscaling=self.zscaling,
-            numthreads=numthreads
+            numthreads=numthreads,
         )[0]
 
     def find_fiducials(self, data="drift_corrected", **kwargs):
@@ -693,9 +708,17 @@ class PALMData(object):
             self.fiducials = []
         radius = max(0.5, self.group_radii[0.999])
         fiducials_dfs = extract_fiducials(data, fiducials, radius, diagnostics=self.diagnostics)
-        self.fiducials_dfs = clean_fiducials(fiducials_dfs, radius=radius, zradius=radius * self.zscaling)
+        self.fiducials_dfs = clean_fiducials(
+            fiducials_dfs, radius=radius, zradius=radius * self.zscaling
+        )
 
-        fiducials = pd.concat([df.agg({'x0': 'median', 'y0': 'median', 'z0': 'median', 'amp': 'count'}) for df in self.fiducials_dfs], axis=1).T
+        fiducials = pd.concat(
+            [
+                df.agg({"x0": "median", "y0": "median", "z0": "median", "amp": "count"})
+                for df in self.fiducials_dfs
+            ],
+            axis=1,
+        ).T
         self.fiducials_agg = prune_blobs(fiducials, 10)
         self.fiducials = self.fiducials_agg[["y0", "x0"]].values
         return self.fiducials
@@ -713,7 +736,7 @@ class PALMData(object):
                 continue
             if df is None:
                 continue
-                
+
             df_nf = filter_fiducials(df, self.fiducials, radius)
 
             setattr(self, df_title + "_nf", df_nf)
@@ -725,14 +748,13 @@ class PALMData(object):
         shape = tuple(pd.read_hdf(fname, "shape"))
         kwargs = {}
 
-
         if save_list is None:
             save_list = cls.save_list
-        
+
         if filter_kwds:
             filter_kwds = dict(where=build_query(filter_kwds))
             logger.debug("Query = {where:}".format(**filter_kwds))
-        
+
         for obj in save_list:
             try:
                 logger.debug("Loading {}".format(obj))
@@ -740,7 +762,11 @@ class PALMData(object):
                     kwargs[obj] = pd.read_hdf(fname, obj, **filter_kwds)
                 except ValueError:
                     kwargs[obj] = pd.read_hdf(fname, obj)
-                    logger.info("Query {where:} invalid for {obj:} in {fname:}".format(obj=obj, fname=fname, where=filter_kwds["where"]))
+                    logger.info(
+                        "Query {where:} invalid for {obj:} in {fname:}".format(
+                            obj=obj, fname=fname, where=filter_kwds["where"]
+                        )
+                    )
             except KeyError:
                 logger.info("Failed to find {} in {}".format(obj, fname))
                 continue
@@ -753,9 +779,9 @@ class PALMData(object):
             try:
                 # save columns in a format that can be queried on disk, (Only coordinates and precisions are queriable)
                 if obj != "drift":
-                    data_columns=True
+                    data_columns = True
                 else:
-                    data_columns=["x0", "y0", "z0", "sigma_x", "sigma_y", "sigma_z", "frame"]
+                    data_columns = ["x0", "y0", "z0", "sigma_x", "sigma_y", "sigma_z", "frame"]
                 getattr(self, obj).to_hdf(fname, obj, format="table", data_columns=data_columns)
                 logger.info("Saved {}".format(obj))
             except AttributeError:
@@ -813,6 +839,7 @@ class PALMData(object):
 
     def hist(self, col="nphotons", **kwargs):
         """Plot # of photons as histograms"""
+
         def plotter(df, ax):
             """utility function"""
             data = df[col]
@@ -831,7 +858,7 @@ class PALMData(object):
             ax.legend()
             return ax
 
-        default_kwargs = dict(figsize=(5,10))
+        default_kwargs = dict(figsize=(5, 10))
         default_kwargs.update(kwargs)
         fig, all_axs = plt.subplots(3, sharex=True, sharey=False, **default_kwargs)
         (ax_p, ax_s, ax_g) = all_axs
@@ -879,7 +906,9 @@ class PALMData(object):
                     # if grouped plot grouped and not grouped as separate hists
                     groupsize = data.groupsize[filt]
                     g0 = dd[groupsize > 1]
-                    g0.hist(bins=b, histtype="stepfilled", ax=ax, zorder=1, alpha=0.7, density=True)
+                    g0.hist(
+                        bins=b, histtype="stepfilled", ax=ax, zorder=1, alpha=0.7, density=True
+                    )
                     median = g0.median()
                     ax.axvline(median, c="k", ls=":", label="{:.1f}".format(median))
                     dd = dd[groupsize == 1]
@@ -951,7 +980,10 @@ class PALMData(object):
 
         # step 1 and 2
         thresh = self.threshold("grouped_nf", 1 / bin_size)
-        cuts_grouped = [pd.cut(self.grouped_nf[c + "0"], np.arange(0, s + bin_size, bin_size)) for c, s in zip("yx", self.shape)]
+        cuts_grouped = [
+            pd.cut(self.grouped_nf[c + "0"], np.arange(0, s + bin_size, bin_size))
+            for c, s in zip("yx", self.shape)
+        ]
         filt = self.grouped_nf.groupby(cuts_grouped).size() < thresh
 
         self.active_pixels = (~filt).sum()
@@ -965,8 +997,12 @@ class PALMData(object):
                 return filt[df.name]
             except KeyError as e:
                 return False
+
         # step 3
-        cuts = [pd.cut(self.drift_corrected_nf[c + "0"], np.arange(0, s + bin_size, bin_size)) for c, s in zip("yx", self.shape)]
+        cuts = [
+            pd.cut(self.drift_corrected_nf[c + "0"], np.arange(0, s + bin_size, bin_size))
+            for c, s in zip("yx", self.shape)
+        ]
         filtered_palm = self.drift_corrected_nf.groupby(cuts).filter(filt_func)
 
         return filtered_palm
@@ -980,9 +1016,13 @@ class PALMData(object):
 # TODO: need to refactor code so that load and save save data to HDF5
 class Data405(object):
     """An object encapsulating function's related to reactivation data"""
+
     try:
-        calibration = pd.read_excel("//dm11/hesslab/Cryo_data/Data Processing Notebooks/Aggregated 405 Calibration.xlsx")
+        calibration = pd.read_excel(
+            "//dm11/hesslab/Cryo_data/Data Processing Notebooks/Aggregated 405 Calibration.xlsx"
+        )
         from scipy.interpolate import interp1d
+
         calibrate = interp1d(calibration["voltage"], calibration["mean"])
         calibrated = True
     except (FileNotFoundError, OSError):
@@ -991,17 +1031,22 @@ class Data405(object):
         def calibrate(self, array):
             """Do nothing with input"""
             return array
+
         calibrated = False
 
     def __init__(self, path):
         """Read in data, normalize column names and set the time index"""
         self.path = path
         self.data = pd.read_csv(path, index_col=0, parse_dates=True)
-        self.data = self.data.rename(columns={k: k.split(" ")[0].lower() for k in self.data.keys()})
+        self.data = self.data.rename(
+            columns={k: k.split(" ")[0].lower() for k in self.data.keys()}
+        )
         # convert voltage to power
         self.data.reactivation = self.calibrate(self.data.reactivation)
         # calculate date delta in hours
-        self.data['date_delta'] = (self.data.index - self.data.index.min()) / np.timedelta64(1, 'h')
+        self.data["date_delta"] = (self.data.index - self.data.index.min()) / np.timedelta64(
+            1, "h"
+        )
 
     def __repr__(self):
         """A representation of the Data405 Object"""
@@ -1032,12 +1077,18 @@ class Data405(object):
         upper_limit = min(upper_limit, data_df.reactivation.max() * 0.999)
 
         # clip data, dropping previous fit column if it exists
-        data_df.drop("fit", axis=1, inplace=True, errors='ignore')
-        data_df_crop = data_df[(data_df.reactivation > lower_limit) & (data_df.reactivation < upper_limit)].dropna()
+        data_df.drop("fit", axis=1, inplace=True, errors="ignore")
+        data_df_crop = data_df[
+            (data_df.reactivation > lower_limit) & (data_df.reactivation < upper_limit)
+        ].dropna()
 
         # fit data
-        self.popt, self.pcov = curve_fit(self.exponent, *data_df_crop[["date_delta", "reactivation"]].values.T)
-        data_df.loc[data_df_crop.index, "fit"] = self.exponent(data_df_crop["date_delta"], *self.popt)
+        self.popt, self.pcov = curve_fit(
+            self.exponent, *data_df_crop[["date_delta", "reactivation"]].values.T
+        )
+        data_df.loc[data_df_crop.index, "fit"] = self.exponent(
+            data_df_crop["date_delta"], *self.popt
+        )
 
         self.fit_win = data_df_crop.date_delta.min(), data_df_crop.date_delta.max()
 
@@ -1062,7 +1113,9 @@ class Data405(object):
             tau = r"$\tau = {:.2f}$ hours".format(1 / self.popt[1])
             eqn_txt = "\n".join([equation, tau])
 
-            self.data.plot(x="date_delta", y=["reactivation", "fit"], ax=ax, label=["Data", eqn_txt])
+            self.data.plot(
+                x="date_delta", y=["reactivation", "fit"], ax=ax, label=["Data", eqn_txt]
+            )
 
             if limits:
                 for i, edge in enumerate(self.fit_win):
@@ -1176,7 +1229,7 @@ class PALMExperiment(object):
         self.activation_start = self.activation.data.index.min()
 
         # new time index with 0 at start of activation
-        self.time_idx = (self.raw.date_idx - self.activation_start) / np.timedelta64(1, 'h')
+        self.time_idx = (self.raw.date_idx - self.activation_start) / np.timedelta64(1, "h")
 
         # frame at which activation begins
         self.frame_start = np.abs(self.time_idx).argmin()
@@ -1192,7 +1245,14 @@ class PALMExperiment(object):
 
     def __repr__(self):
         """A representation of this class"""
-        sub_reps = ("\n" + "+" * 80 + "\n").join([repr(self.raw), repr(self.palm), repr(self.activation), repr(self.cached_data.columns)])
+        sub_reps = ("\n" + "+" * 80 + "\n").join(
+            [
+                repr(self.raw),
+                repr(self.palm),
+                repr(self.activation),
+                repr(self.cached_data.columns),
+            ]
+        )
         top_str = "This PALM Experiment consists of:\n" + "=" * 80 + "\n"
         return top_str + sub_reps
 
@@ -1226,28 +1286,39 @@ class PALMExperiment(object):
         def shift_and_sum(chunk, chunked_shifts):
             """Drift correct raw data sum and find counts per pixel to take mean later"""
             # quick sanity check
-            assert len(chunk) == len(chunked_shifts), "Lengths don't match, {} != {}".format(chunk, chunked_shifts)
+            assert len(chunk) == len(chunked_shifts), "Lengths don't match, {} != {}".format(
+                chunk, chunked_shifts
+            )
 
             # convert image data to float
             chunk = chunk.astype(float)
 
             # drift correct the chunk
-            shifted_chunk = np.array([
-                # we're drift correcting the *data* so negative shifts
-                # fill with nan's so we can mask those off too.
-                ndi.shift(data, (-y, -x), order=1, cval=np.nan)
-                for data, (y, x) in zip(chunk, chunked_shifts)
-            ])
+            shifted_chunk = np.array(
+                [
+                    # we're drift correcting the *data* so negative shifts
+                    # fill with nan's so we can mask those off too.
+                    ndi.shift(data, (-y, -x), order=1, cval=np.nan)
+                    for data, (y, x) in zip(chunk, chunked_shifts)
+                ]
+            )
 
             # return sum and and counts as (y, x, type) array
-            return np.dstack((np.nansum(shifted_chunk, axis=0), np.isfinite(shifted_chunk).sum(axis=0)))
+            return np.dstack(
+                (np.nansum(shifted_chunk, axis=0), np.isfinite(shifted_chunk).sum(axis=0))
+            )
 
         # get x, y shifts from palm drift, interpolating missing values
-        shifts = self.palm.drift[["y0", "x0"]].reindex(pd.RangeIndex(len(self.raw))).interpolate("slinear", fill_value="extrapolate", limit_direction="both").values
+        shifts = (
+            self.palm.drift[["y0", "x0"]]
+            .reindex(pd.RangeIndex(len(self.raw)))
+            .interpolate("slinear", fill_value="extrapolate", limit_direction="both")
+            .values
+        )
 
         # set up computation tree
         to_compute = [
-            shift_and_sum(lazy_imread(path), shifts[cut_points[i]:cut_points[i + 1]])
+            shift_and_sum(lazy_imread(path), shifts[cut_points[i] : cut_points[i + 1]])
             for i, path in enumerate(self.raw.paths)
         ]
 
@@ -1257,7 +1328,9 @@ class PALMExperiment(object):
         # compute mean from intermediate results.
         return result[..., 0].sum(0) / result[..., 1].sum(0)
 
-    def masked_agg(self, masktype, agg_func=np.median, agg_args=(), agg_kwargs={}, prefilter=False, names=None):
+    def masked_agg(
+        self, masktype, agg_func=np.median, agg_args=(), agg_kwargs={}, prefilter=False, names=None
+    ):
         """Mask and aggregate raw data along frame direction with agg_func
 
         Save results on RawImages object"""
@@ -1268,7 +1341,7 @@ class PALMExperiment(object):
             logger.info("{} not found".format(agg_func))
 
             assert hasattr(agg_func, "__call__"), "{} is not a function".format(agg_func)
-            
+
             def agg_func2(masked_array, *args, **kwargs):
                 array = np.ma.filled(masked_array, np.nan)
                 return agg_func(array, *args, **kwargs)
@@ -1279,9 +1352,13 @@ class PALMExperiment(object):
         elif masktype.lower() == "fiducials":
             mask = ~self.palm.fiducial_mask
         elif masktype.lower() == "background":
-            mask = (self.palm.fiducial_mask | self.palm.data_mask)
+            mask = self.palm.fiducial_mask | self.palm.data_mask
         else:
-            raise ValueError("masktype {} not recognized, needs to be one of 'data', 'fiducials' or 'background'".format(masktype))
+            raise ValueError(
+                "masktype {} not recognized, needs to be one of 'data', 'fiducials' or 'background'".format(
+                    masktype
+                )
+            )
 
         # figure out how to split the drift to align with raw data
         cut_points = np.append(0, self.raw.lengths).cumsum()
@@ -1290,7 +1367,9 @@ class PALMExperiment(object):
         def shift_and_mask(chunk, chunked_shifts):
             """Drift correct raw data (based on PALM drift correction), mask and aggregate"""
             # calculate chunked mask
-            assert len(chunk) == len(chunked_shifts), "Lengths don't match, {} != {}".format(chunk, chunked_shifts)
+            assert len(chunk) == len(chunked_shifts), "Lengths don't match, {} != {}".format(
+                chunk, chunked_shifts
+            )
 
             # convert image data to float
             if prefilter:
@@ -1299,12 +1378,14 @@ class PALMExperiment(object):
             chunk = chunk.astype(float)
 
             # drift correct the chunk
-            shifted_chunk = np.array([
-                # we're drift correcting the *data* so negative shifts
-                # fill with nan's so we can mask those off too.
-                ndi.shift(data, (-y, -x), order=1, cval=np.nan)
-                for data, (y, x) in zip(chunk, chunked_shifts)
-            ])
+            shifted_chunk = np.array(
+                [
+                    # we're drift correcting the *data* so negative shifts
+                    # fill with nan's so we can mask those off too.
+                    ndi.shift(data, (-y, -x), order=1, cval=np.nan)
+                    for data, (y, x) in zip(chunk, chunked_shifts)
+                ]
+            )
 
             # True indicates a masked (i.e. invalid) data.
             # cut out areas that were shifted out of frame
@@ -1314,14 +1395,21 @@ class PALMExperiment(object):
             shifted_masked_array = np.ma.masked_array(shifted_chunk, extended_mask)
 
             # return aggregated data along frame axis
-            return np.asarray(agg_func2(shifted_masked_array, *agg_args, axis=(1, 2), **agg_kwargs))
+            return np.asarray(
+                agg_func2(shifted_masked_array, *agg_args, axis=(1, 2), **agg_kwargs)
+            )
 
         # get x, y shifts from palm drift, interpolating missing values
-        shifts = self.palm.drift[["y0", "x0"]].reindex(pd.RangeIndex(len(self.raw))).interpolate("slinear", fill_value="extrapolate", limit_direction="both").values
+        shifts = (
+            self.palm.drift[["y0", "x0"]]
+            .reindex(pd.RangeIndex(len(self.raw)))
+            .interpolate("slinear", fill_value="extrapolate", limit_direction="both")
+            .values
+        )
 
         # set up computation tree
         to_compute = [
-            shift_and_mask(lazy_imread(path), shifts[cut_points[i]:cut_points[i + 1]])
+            shift_and_mask(lazy_imread(path), shifts[cut_points[i] : cut_points[i + 1]])
             for i, path in enumerate(self.raw.paths)
         ]
 
@@ -1351,9 +1439,12 @@ class PALMExperiment(object):
         """Convenience function to calculate and save the usual masked aggregations."""
         if fname is not None:
             """update store"""
+
             def save():
                 self.cached_data.to_hdf(fname, "cached_data")
+
         else:
+
             def save():
                 pass
 
@@ -1375,23 +1466,31 @@ class PALMExperiment(object):
 
     def calc_contrasts(self):
         """Convenience function to calculate and save the usual masked aggregations."""
-        self.masked_agg("data",
-                        poisson_stats,
-                        names=[
-                            "mode",
-                            "median_above_noise",
-                            "fraction_of_pixels_above_noise",
-                            "median_max",
-                            "mean_peak_counts"
-                        ]
-                        )
+        self.masked_agg(
+            "data",
+            poisson_stats,
+            names=[
+                "mode",
+                "median_above_noise",
+                "fraction_of_pixels_above_noise",
+                "median_max",
+                "mean_peak_counts",
+            ],
+        )
         self.masked_agg("background", mode)
         self.masked_agg("fiducials")
         self.masked_agg("background")
         self.masked_agg("data")
 
         # filter PALM to reasonable limits
-        palm = self.palm.filter(amp=(25, 6e4), sigma_x=(0, 0.5), sigma_y=(0, 0.5), width_x=(0, 1.5), width_y=(0, 1.5), sigma_z=(0, 500))
+        palm = self.palm.filter(
+            amp=(25, 6e4),
+            sigma_x=(0, 0.5),
+            sigma_y=(0, 0.5),
+            width_x=(0, 1.5),
+            width_y=(0, 1.5),
+            sigma_z=(0, 500),
+        )
         # remove fiducials
         palm.dianostics = True
         palm.fiducials = self.palm.fiducials
@@ -1399,7 +1498,9 @@ class PALMExperiment(object):
         # limit data to where mitos are
         palm2 = palm.spatial_filter(1, False)
 
-        SNR = palm2.assign(amp_snr=palm2.amp / palm2.offset, nphotons_snr=palm2.nphotons / palm2.offset).dropna()
+        SNR = palm2.assign(
+            amp_snr=palm2.amp / palm2.offset, nphotons_snr=palm2.nphotons / palm2.offset
+        ).dropna()
         SNR = SNR[SNR.offset > 0]
 
         for s in ("amp", "nphotons"):
@@ -1440,7 +1541,9 @@ class PALMExperiment(object):
             if func is weird:
                 m = self.nofeedback.max()
                 p0 = (m, 1, -1, m / 10, 0.5, -0.5)
-        func_label_dict = {weird: ("$y(t) = " + "+".join(["{:.3f} (1 + {:.3f} t)^{{{:.3f}}}"] * 2) + "$")}
+        func_label_dict = {
+            weird: ("$y(t) = " + "+".join(["{:.3f} (1 + {:.3f} t)^{{{:.3f}}}"] * 2) + "$")
+        }
         func_label = func_label_dict[weird]
 
         # do the fit
@@ -1448,8 +1551,7 @@ class PALMExperiment(object):
         fit = func(self.nofeedback.index, *popt)
 
         # plot the fit
-        ax.plot(self.nofeedback.index, fit,
-                label=func_label.format(*popt))
+        ax.plot(self.nofeedback.index, fit, label=func_label.format(*popt))
 
         # save the residuals in case we want them later
         self.resid = self.nofeedback - fit
@@ -1579,7 +1681,11 @@ class PALMExperiment(object):
         self.output["pcov_decay"] = pcov
 
         # make the label
-        label_base = "$y(t) = " + "{:+.3g} e^{{-{:.2g}t}}" * (len(popt) // 2) + " {:+.2g}$" * (len(popt) % 2)
+        label_base = (
+            "$y(t) = "
+            + "{:+.3g} e^{{-{:.2g}t}}" * (len(popt) // 2)
+            + " {:+.2g}$" * (len(popt) % 2)
+        )
 
         # add the fit line and legend
         ax.plot(fit_data.index, multi_exp(xdata, *popt), label=label_base.format(*popt), ls="--")
@@ -1617,7 +1723,7 @@ class PALMExperiment(object):
         titles = (
             "Average # of Photons / Pixel",
             "Raw Localizations\nPer Frame (without Fiducials)",
-            "Contrast Ratio"
+            "Contrast Ratio",
         )
 
         data = self.intensity, self.counts, self.contrast_ratio
@@ -1639,12 +1745,26 @@ class PALMExperiment(object):
         # add anotation
         if s.start is None:
             med_pre = self.contrast_ratio.loc[:0].median()
-            ax_contrast.hlines(med_pre, self.contrast_ratio.index.min(), 0, "C2", lw=2,
-                               label="Pre-activation {:.1f}".format(med_pre), zorder=3)
+            ax_contrast.hlines(
+                med_pre,
+                self.contrast_ratio.index.min(),
+                0,
+                "C2",
+                lw=2,
+                label="Pre-activation {:.1f}".format(med_pre),
+                zorder=3,
+            )
         if s.stop is None:
             med_post = self.contrast_ratio.loc[0:].median()
-            ax_contrast.hlines(med_post, 0, self.contrast_ratio.index.max(), "C3", lw=2,
-                               label="Post-activation {:.1f}".format(med_post), zorder=3)
+            ax_contrast.hlines(
+                med_post,
+                0,
+                self.contrast_ratio.index.max(),
+                "C3",
+                lw=2,
+                label="Post-activation {:.1f}".format(med_post),
+                zorder=3,
+            )
 
             ax_counts = axs[1]
             # remove legends
@@ -1655,8 +1775,15 @@ class PALMExperiment(object):
             set_point = self.set_point = self.counts.loc[0:].median()
             # save set_point for later
             self.output["set_point"] = set_point
-            ax_counts.hlines(set_point, 0, self.counts.index.max(), "C2", lw=2,
-                             label="Set Point {:}".format(set_point), zorder=3)
+            ax_counts.hlines(
+                set_point,
+                0,
+                self.counts.index.max(),
+                "C2",
+                lw=2,
+                label="Set Point {:}".format(set_point),
+                zorder=3,
+            )
             ax_counts.legend()
 
         ax_contrast.legend()
@@ -1672,7 +1799,7 @@ class PALMExperiment(object):
             "masked_data_amax": "Masked Max / Masked Median",
             "masked_data_amax_prefilter": "Filtered Masked Max / Masked Median",
             "masked_data_nanpercentile": "Masked 99% / Masked Median",
-            "masked_data_nanpercentile_prefilter": "Filtered Masked 99% / Masked Median"
+            "masked_data_nanpercentile_prefilter": "Filtered Masked 99% / Masked Median",
         }
 
         if background:
@@ -1702,7 +1829,14 @@ class PALMExperiment(object):
 
         # setup plot
         num_d = len(data_dict)
-        fig, axs = plt.subplots(num_d, 2, sharex="col", sharey="row", gridspec_kw=dict(width_ratios=(3, 1)), figsize=(6, 3 * num_d))
+        fig, axs = plt.subplots(
+            num_d,
+            2,
+            sharex="col",
+            sharey="row",
+            gridspec_kw=dict(width_ratios=(3, 1)),
+            figsize=(6, 3 * num_d),
+        )
 
         # make plot
         shared_hist = axs[0, 1].get_shared_x_axes()
@@ -1721,7 +1855,13 @@ class PALMExperiment(object):
             # plot
             for d, label in zip((contrast, roll), ("Data", "Rolling Mean, 1000 Frames")):
                 d.plot(ax=ax_plot, label=label, zorder=2)
-                d.hist(bins=128, ax=ax_hist, orientation='horizontal', histtype="stepfilled", density=True)
+                d.hist(
+                    bins=128,
+                    ax=ax_hist,
+                    orientation="horizontal",
+                    histtype="stepfilled",
+                    density=True,
+                )
 
             med_pre = contrast.loc[:0].median()
             med_post = contrast.loc[0:].median()
@@ -1730,10 +1870,24 @@ class PALMExperiment(object):
             self.output[p] = {"pre": med_pre, "post": med_post}
 
             # add anotation
-            ax_plot.hlines(med_pre, contrast.index.min(), 0, "C2", lw=2,
-                           label="Pre-activation {:.1f}".format(med_pre), zorder=3)
-            ax_plot.hlines(med_post, 0, contrast.index.max(), "C3", lw=2,
-                           label="Post-activation {:.1f}".format(med_post), zorder=3)
+            ax_plot.hlines(
+                med_pre,
+                contrast.index.min(),
+                0,
+                "C2",
+                lw=2,
+                label="Pre-activation {:.1f}".format(med_pre),
+                zorder=3,
+            )
+            ax_plot.hlines(
+                med_post,
+                0,
+                contrast.index.max(),
+                "C3",
+                lw=2,
+                label="Post-activation {:.1f}".format(med_post),
+                zorder=3,
+            )
 
             ax_hist.axhline(med_pre, color="C2", linewidth=2)
             ax_hist.axhline(med_post, color="C3", linewidth=2)
@@ -1752,15 +1906,17 @@ class PALMExperiment(object):
             "masked_data_amax": "Masked Max / Masked Median",
             "masked_data_nanpercentile": "Masked 99% / Masked Median",
             "masked_data_poisson_stats_median_max": "Median Peak to Background",
-            "masked_data_poisson_stats_mean_peak_counts": "Mean Signal Above Background"
+            "masked_data_poisson_stats_mean_peak_counts": "Mean Signal Above Background",
         }
 
         if background == "median":
             bg = self.cached_data.masked_background_median.rolling(250, 0, True).mean()
-            intensity = (self.cached_data.masked_data_median.rolling(250, 0, True).mean() - bg)
+            intensity = self.cached_data.masked_data_median.rolling(250, 0, True).mean() - bg
         elif background == "mode":
             bg = self.cached_data.masked_background_mode.rolling(250, 0, True).mean()
-            intensity = (self.cached_data.masked_data_poisson_stats_mode.rolling(250, 0, True).mean() - bg)
+            intensity = (
+                self.cached_data.masked_data_poisson_stats_mode.rolling(250, 0, True).mean() - bg
+            )
         else:
             raise Exception
         # make sure intensity doesn't go below 1, if intensity were zero then
@@ -1783,7 +1939,14 @@ class PALMExperiment(object):
 
         # setup plot
         num_d = len(data_dict)
-        fig, axs = plt.subplots(num_d, 2, sharex="col", sharey="row", gridspec_kw=dict(width_ratios=(3, 1)), figsize=(6, 3 * num_d))
+        fig, axs = plt.subplots(
+            num_d,
+            2,
+            sharex="col",
+            sharey="row",
+            gridspec_kw=dict(width_ratios=(3, 1)),
+            figsize=(6, 3 * num_d),
+        )
 
         # make plot
         shared_hist = axs[0, 1].get_shared_x_axes()
@@ -1802,7 +1965,13 @@ class PALMExperiment(object):
             # plot
             for d, label in zip((contrast, roll), ("Data", "Rolling Mean, 250 Frames")):
                 d.plot(ax=ax_plot, label=label, zorder=2)
-                d.hist(bins=128, ax=ax_hist, orientation='horizontal', histtype="stepfilled", density=True)
+                d.hist(
+                    bins=128,
+                    ax=ax_hist,
+                    orientation="horizontal",
+                    histtype="stepfilled",
+                    density=True,
+                )
 
             med_pre = contrast.loc[:0].median()
             med_post = contrast.loc[0:].median()
@@ -1811,10 +1980,24 @@ class PALMExperiment(object):
             self.output[p] = {"pre": med_pre, "post": med_post}
 
             # add anotation
-            ax_plot.hlines(med_pre, contrast.index.min(), 0, "C2", lw=2,
-                           label="Pre-activation {:.1f}".format(med_pre), zorder=3)
-            ax_plot.hlines(med_post, 0, contrast.index.max(), "C3", lw=2,
-                           label="Post-activation {:.1f}".format(med_post), zorder=3)
+            ax_plot.hlines(
+                med_pre,
+                contrast.index.min(),
+                0,
+                "C2",
+                lw=2,
+                label="Pre-activation {:.1f}".format(med_pre),
+                zorder=3,
+            )
+            ax_plot.hlines(
+                med_post,
+                0,
+                contrast.index.max(),
+                "C3",
+                lw=2,
+                label="Post-activation {:.1f}".format(med_post),
+                zorder=3,
+            )
 
             ax_hist.axhline(med_pre, color="C2", linewidth=2)
             ax_hist.axhline(med_post, color="C3", linewidth=2)
@@ -1868,22 +2051,28 @@ class PALMExperiment(object):
 
             s["kDB"] = (s.B * s.ka + s.A * s.kb) / (s.A + s.B)
             s["kBK"] = s.ka * s.kb / s.kDB
-            s["kBD"] = (s.A * s.B * (s.ka - s.kb)**2) / ((s.A + s.B) * (s.B * s.ka + s.A * s.kb))
+            s["kBD"] = (s.A * s.B * (s.ka - s.kb) ** 2) / ((s.A + s.B) * (s.B * s.ka + s.A * s.kb))
 
             s["tauDB"], s["tauBK"], s["tauBD"] = 1 / s.kDB, 1 / s.kBK, 1 / s.kBD
 
-            for k in ("set_point", "density", "density_median", "density_asymptote", "active_pixel_density"):
+            for k in (
+                "set_point",
+                "density",
+                "density_median",
+                "density_asymptote",
+                "active_pixel_density",
+            ):
                 s[k] = output[k]
         except KeyError:
             pass
 
         keys = (
-            'contrast',
-            'contrast2',
-            'masked_data_amax',
-            'masked_data_amax_prefilter',
-            'masked_data_nanpercentile',
-            'masked_data_nanpercentile_prefilter'
+            "contrast",
+            "contrast2",
+            "masked_data_amax",
+            "masked_data_amax_prefilter",
+            "masked_data_nanpercentile",
+            "masked_data_nanpercentile_prefilter",
         )
         for k in keys:
             for kk in ("pre", "post"):
@@ -1902,7 +2091,7 @@ def add_line(ax, data, func=np.mean, fmt_str=":.0f", **kwargs):
         if ax.lines or ax.patches:
             c = next(ax._get_lines.prop_cycler)
         else:
-            c = dict(color='r')
+            c = dict(color="r")
         kwargs.update(c)
     ax.axvline(m, label=("{} = {" + fmt_str + "}").format(func_name, m), **kwargs)
 
@@ -1983,7 +2172,14 @@ def make_trace(f, min_frame=None, max_frame=None):
         min_frame = f.frame.min()
     if max_frame is None:
         max_frame = f.frame.max()
-    return f.groupby("frame").size().reindex(np.arange(min_frame, max_frame + 1)).fillna(0).astype(int).values
+    return (
+        f.groupby("frame")
+        .size()
+        .reindex(np.arange(min_frame, max_frame + 1))
+        .fillna(0)
+        .astype(int)
+        .values
+    )
 
 
 def on_off_times(trace, trim=False):
@@ -2051,7 +2247,7 @@ def bhattacharyya(mus, sigmas):
     with diagonal covariance matrices
     https://en.wikipedia.org/wiki/Bhattacharyya_distance"""
     # convert sigmas in vars
-    s1, s2 = sigmas**2
+    s1, s2 = sigmas ** 2
     m1, m2 = mus
     m = m1 - m2
     s = (s1 + s2) / 2
@@ -2067,13 +2263,13 @@ def make_matrix(df, min_sigma=0, coords="xy"):
     Each entry is the Bhattacharyya distance between the two
     probability distributions defined by the grouped SMLM events
     """
-    
+
     # make distance matrix
     n = len(df)
     mat = np.zeros((n, n))
-    
+
     # fill it in
-    # pull data from DataFrame first, speeds up operations    
+    # pull data from DataFrame first, speeds up operations
     mus = df[[c + "0" for c in coords]].values
     Sigmas = np.fmax(min_sigma, df[["sigma_" + c for c in coords]].values)
     for s in itt.combinations(range(n), 2):
@@ -2089,13 +2285,13 @@ def cluster_groups(df, *args, affinity="distance", diagnostics=False, **kwargs):
 
     # make the distance matrix
     mat = make_matrix(df, *args, **kwargs)
-    
+
     # choose which metric to use
     if affinity == "distance":
         # amat = np.exp(np.exp(-mat) - 1)
         amat = np.exp(-mat) - 1
     else:
-        amat = np.exp(-mat**2)
+        amat = np.exp(-mat ** 2)
 
     amat[~np.isfinite(amat)] = -1e16
 
@@ -2108,7 +2304,9 @@ def cluster_groups(df, *args, affinity="distance", diagnostics=False, **kwargs):
         df_c = df.copy()
         df_c["group_id"] = aff.labels_
         fig, ax = plt.subplots()
-        ax.scatter(df_c.x0, df_c.y0, c=df_c.group_id, s=df_c.sigma_z, edgecolor="k", cmap="tab10", vmax=10)
+        ax.scatter(
+            df_c.x0, df_c.y0, c=df_c.group_id, s=df_c.sigma_z, edgecolor="k", cmap="tab10", vmax=10
+        )
 
     # return the new number of blinks.
     if not np.isfinite(aff.labels_).all():
@@ -2133,7 +2331,9 @@ def count_blinks(onofftimes, gap):
     return blinks
 
 
-def fit_power_law(x, y, maxiters=100, floor=0.1, upper_limit=None, lower_limit=None, include_offset=False):
+def fit_power_law(
+    x, y, maxiters=100, floor=0.1, upper_limit=None, lower_limit=None, include_offset=False
+):
     """Fit power law to data, iteratively truncating long noisy tail if desired"""
     # initialize iteration variables
     all_popt = []
@@ -2148,9 +2348,15 @@ def fit_power_law(x, y, maxiters=100, floor=0.1, upper_limit=None, lower_limit=N
         if i < 1:
             if include_offset:
                 # first find best fit for power law
-                popt_no_offset, ul = fit_power_law(x, y, maxiters=maxiters,
-                                                   floor=floor, upper_limit=upper_limit,
-                                                   lower_limit=lower_limit, include_offset=False)
+                popt_no_offset, ul = fit_power_law(
+                    x,
+                    y,
+                    maxiters=maxiters,
+                    floor=floor,
+                    upper_limit=upper_limit,
+                    lower_limit=lower_limit,
+                    include_offset=False,
+                )
                 # then estimate offset
                 popt = np.append(popt_no_offset, y[y > 0].mean())
             else:
@@ -2244,7 +2450,7 @@ def power_law_cont(tdata, alpha, tmin=1):
 
 def stretched_exp_ccdf(tdata, tau, beta):
     """Closed form cCDF for a stretched exponential distribution"""
-    return gammaincc(1.0 / beta, (tdata / tau) ** beta) / (beta * gamma(1. + 1. / beta))
+    return gammaincc(1.0 / beta, (tdata / tau) ** beta) / (beta * gamma(1.0 + 1.0 / beta))
 
 
 def power_law_cont_ccdf(tdata, alpha, tmin=1):
@@ -2291,8 +2497,13 @@ def fit_and_plot_se_pl_ccdf(offtimes, density=True, ax=None, return_all=False):
     # make some reasonable starting guesses for the parameters
     p0 = np.percentile(offtimes, 95), 1, 2, 0.5, ccdf[0]
     try:
-        popt, pcov = curve_fit(se_pl_ccdf, x, ccdf, p0=p0,
-                               bounds=((0, 0, 0, 0, 0), (np.inf, np.inf, np.inf, 1, np.inf)))
+        popt, pcov = curve_fit(
+            se_pl_ccdf,
+            x,
+            ccdf,
+            p0=p0,
+            bounds=((0, 0, 0, 0, 0), (np.inf, np.inf, np.inf, 1, np.inf)),
+        )
     except RuntimeError:
         logger.warning("fit failed with starting variables = {}".format(p0))
         popt = None
@@ -2307,14 +2518,30 @@ def fit_and_plot_se_pl_ccdf(offtimes, density=True, ax=None, return_all=False):
         ccdf_se = stretched_exp_ccdf(x, tau, beta)
         ccdf_pl = power_law_cont_ccdf(x, alpha, tmin=1)
 
-        ax.loglog(x, ccdf_pl * (1 - f) * pre, "C2--", label="{:.0%} Power Law: $\\alpha = {:.2f}$".format(1 - f, alpha))
-        ax.loglog(x, ccdf_se * f * pre, "C2:", label="{:.0%} Str. Exp.: $\\tau = {:}$, $\\beta = {:.2f}$".format(f, latex_format_e(tau), beta))
+        ax.loglog(
+            x,
+            ccdf_pl * (1 - f) * pre,
+            "C2--",
+            label="{:.0%} Power Law: $\\alpha = {:.2f}$".format(1 - f, alpha),
+        )
+        ax.loglog(
+            x,
+            ccdf_se * f * pre,
+            "C2:",
+            label="{:.0%} Str. Exp.: $\\tau = {:}$, $\\beta = {:.2f}$".format(
+                f, latex_format_e(tau), beta
+            ),
+        )
 
         ax.legend()
     ax.set_xlabel("# of Frames")
     ax.set_ylabel("cCDF")
     if return_all:
-        return fig, ax, dict(ccdf_tau=tau, ccdf_beta=beta, ccdf_alpha=alpha, ccdf_f=f, ccdf_pre=pre)
+        return (
+            fig,
+            ax,
+            dict(ccdf_tau=tau, ccdf_beta=beta, ccdf_alpha=alpha, ccdf_f=f, ccdf_pre=pre),
+        )
     return fig, ax
 
 
@@ -2334,12 +2561,18 @@ def plot_occurrences(samples_blinks, num=10, ax=None, return_all=False):
         fig = ax.get_figure()
 
     # find on frames
-    all_onframes = pd.concat([calc_onframes(s) for s in tqdm.tqdm_notebook(samples_blinks, desc="Getting on frames")], ignore_index=True)
+    all_onframes = pd.concat(
+        [calc_onframes(s) for s in tqdm.tqdm_notebook(samples_blinks, desc="Getting on frames")],
+        ignore_index=True,
+    )
     # calculate the number of occurrences in each frame
     frames_and_occurrences = all_onframes.groupby(["occurrence", "frame"]).size()
 
     # reset the index to start at 1 for loglog plottings
-    frames_and_occurrences.index = frames_and_occurrences.index.set_levels(frames_and_occurrences.index.levels[1] - frames_and_occurrences.index.levels[1].min() + 1, level=1)
+    frames_and_occurrences.index = frames_and_occurrences.index.set_levels(
+        frames_and_occurrences.index.levels[1] - frames_and_occurrences.index.levels[1].min() + 1,
+        level=1,
+    )
     frames_and_occurrences /= frames_and_occurrences[1].sum()
 
     all_blinks = pd.concat(samples_blinks, ignore_index=True)
@@ -2365,7 +2598,17 @@ def plot_occurrences(samples_blinks, num=10, ax=None, return_all=False):
     return fig, ax
 
 
-def plot_blinks(gap, max_frame, onofftimes=None, samples_blinks=None, ax=None, min_sigma=0, coords="xyz", density=False, return_all=False):
+def plot_blinks(
+    gap,
+    max_frame,
+    onofftimes=None,
+    samples_blinks=None,
+    ax=None,
+    min_sigma=0,
+    coords="xyz",
+    density=False,
+    return_all=False,
+):
     """Plot blinking events given on off times and fitted power law decay of off times"""
     if ax is None:
         fig, ax = plt.subplots()
@@ -2382,7 +2625,9 @@ def plot_blinks(gap, max_frame, onofftimes=None, samples_blinks=None, ax=None, m
         grouped = [dask.delayed(fast_group)(s, gap) for s in samples_blinks]
         aggs = [dask.delayed(agg_groups)(g) for g in grouped]
 
-        regroup = dask.delayed([dask.delayed(cluster_groups)(agg, min_sigma, coords=coords) for agg in aggs])
+        regroup = dask.delayed(
+            [dask.delayed(cluster_groups)(agg, min_sigma, coords=coords) for agg in aggs]
+        )
         blinks = np.concatenate(regroup.compute(scheduler="processes"))
         prefix = "Corrected\n"
     elif onofftimes is not None:
@@ -2424,7 +2669,12 @@ def plot_blinks(gap, max_frame, onofftimes=None, samples_blinks=None, ax=None, m
         sigma_lam = mu / np.sqrt(alpha)
         results.update(dict(nb_mu=mu, nb_alpha=alpha, nb_sigma_lam=sigma_lam))
 
-        label += "\n" + r"$\alpha={:.2f}$, $\mu_{{\lambda}}={:.2f}$, $\sigma_{{\lambda}}={:.2f}$".format(alpha, mu, sigma_lam)
+        label += (
+            "\n"
+            + r"$\alpha={:.2f}$, $\mu_{{\lambda}}={:.2f}$, $\sigma_{{\lambda}}={:.2f}$".format(
+                alpha, mu, sigma_lam
+            )
+        )
         if density:
             ax.set_ylabel("Frequency")
         else:
@@ -2449,7 +2699,7 @@ def plot_blinks(gap, max_frame, onofftimes=None, samples_blinks=None, ax=None, m
 
 
 def prune_blobs(df, radius):
-        """
+    """
         Pruner method takes blobs list with the third column replaced by
         intensity instead of sigma and then removes the less intense blob
         if its within diameter of a more intense blob.
@@ -2472,44 +2722,39 @@ def prune_blobs(df, radius):
             `array` with overlapping blobs removed.
         """
 
-        # make a copy of blobs otherwise it will be changed
-        # create the tree
-        blobs = df[["x0", "y0", "amp"]].values
-        kdtree = cKDTree(blobs[:, :2])
-        # query all pairs of points within diameter of each other
-        list_of_conflicts = list(kdtree.query_pairs(radius))
-        # sort the collisions by max amplitude of the pair
-        # we want to deal with collisions between the largest
-        # blobs and nearest neighbors first:
-        # Consider the following sceneario in 1D
-        # A-B-C
-        # are all the same distance and colliding with amplitudes
-        # A > B > C
-        # if we start with the smallest, both B and C will be discarded
-        # If we start with the largest, only B will be
-        # Sort in descending order
-        list_of_conflicts.sort(
-            key=lambda x: max(blobs[x[0], -1], blobs[x[1], -1]),
-            reverse=True
-        )
-        # indices of pruned blobs
-        pruned_blobs = set()
-        # loop through conflicts
-        for idx_a, idx_b in tqdm.tqdm_notebook(list_of_conflicts, desc="Removing conflicts"):
-            # see if we've already pruned one of the pair
-            if (idx_a not in pruned_blobs) and (idx_b not in pruned_blobs):
-                # compare based on amplitude
-                if blobs[idx_a, -1] > blobs[idx_b, -1]:
-                    pruned_blobs.add(idx_b)
-                else:
-                    pruned_blobs.add(idx_a)
-        # generate the pruned list
-        # pruned_blobs_set = {(blobs[i, 0], blobs[i, 1])
-        #                         for i in pruned_blobs}
-        # set internal blobs array to blobs_array[blobs_array[:, 2] > 0]
-        return df.iloc[[
-            i for i in range(len(blobs)) if i not in pruned_blobs
-        ]]
+    # make a copy of blobs otherwise it will be changed
+    # create the tree
+    blobs = df[["x0", "y0", "amp"]].values
+    kdtree = cKDTree(blobs[:, :2])
+    # query all pairs of points within diameter of each other
+    list_of_conflicts = list(kdtree.query_pairs(radius))
+    # sort the collisions by max amplitude of the pair
+    # we want to deal with collisions between the largest
+    # blobs and nearest neighbors first:
+    # Consider the following sceneario in 1D
+    # A-B-C
+    # are all the same distance and colliding with amplitudes
+    # A > B > C
+    # if we start with the smallest, both B and C will be discarded
+    # If we start with the largest, only B will be
+    # Sort in descending order
+    list_of_conflicts.sort(key=lambda x: max(blobs[x[0], -1], blobs[x[1], -1]), reverse=True)
+    # indices of pruned blobs
+    pruned_blobs = set()
+    # loop through conflicts
+    for idx_a, idx_b in tqdm.tqdm_notebook(list_of_conflicts, desc="Removing conflicts"):
+        # see if we've already pruned one of the pair
+        if (idx_a not in pruned_blobs) and (idx_b not in pruned_blobs):
+            # compare based on amplitude
+            if blobs[idx_a, -1] > blobs[idx_b, -1]:
+                pruned_blobs.add(idx_b)
+            else:
+                pruned_blobs.add(idx_a)
+    # generate the pruned list
+    # pruned_blobs_set = {(blobs[i, 0], blobs[i, 1])
+    #                         for i in pruned_blobs}
+    # set internal blobs array to blobs_array[blobs_array[:, 2] > 0]
+    return df.iloc[[i for i in range(len(blobs)) if i not in pruned_blobs]]
 
 
 def check_density(shape, data, mag, zscaling, thresh_func=thresholding.threshold_triangle, dim=3):
@@ -2565,12 +2810,20 @@ def check_density(shape, data, mag, zscaling, thresh_func=thresholding.threshold
 
             # plot of histogram
             space_time_density = hist2d.ravel() / frame_range
-            bins = np.logspace(np.log10(space_time_density[space_time_density > 0].min() * 0.9), np.log10(space_time_density.max() * 1.1), 128)
+            bins = np.logspace(
+                np.log10(space_time_density[space_time_density > 0].min() * 0.9),
+                np.log10(space_time_density.max() * 1.1),
+                128,
+            )
 
             ax2.hist(space_time_density, bins=bins, density=True, log=True, color="k")
             ax2.set_xscale("log")
             ax2.axvline(event_density, c="r", label="99% Thresh = {:.3e}".format(event_density))
-            ax2.axvline(thresh / frame_range, c="b", label="{} = {:g}".format(thresh_func.__name__, thresh / frame_range))
+            ax2.axvline(
+                thresh / frame_range,
+                c="b",
+                label="{} = {:g}".format(thresh_func.__name__, thresh / frame_range),
+            )
             ax2.legend()
             ax2.set_title("Histogram of Local Densities")
             ax2.set_xlabel("Space Time Event Density\n(# Events per unit space per unit time)")
@@ -2612,7 +2865,9 @@ def bin_by_photons(blob, nphotons):
     bins = np.arange(0, total_nphotons, nphotons)
 
     # break the DF into groups with n photons
-    blob2 = blob.assign(group_id=blob.groupby(pd.cut(blob.nphotons.cumsum(), bins)).grouper.group_info[0])
+    blob2 = blob.assign(
+        group_id=blob.groupby(pd.cut(blob.nphotons.cumsum(), bins)).grouper.group_info[0]
+    )
     # group and calculate the mortensen precision
     # we recalc mortensen because the new agg has an average width and sum number of photons
     blob2 = blob2.drop(["mort_x", "mort_y"], axis=1, errors="ignore")
@@ -2690,7 +2945,9 @@ def fit_precision(precision_df, non_negative=False, diagnostics=False):
 
     if diagnostics:
         fit_df = pd.concat(fit_df, axis=1)
-        fig, ((ax_z, ax_fit_z), (ax_xy, ax_fit_xy)) = plt.subplots(2, 2, sharex=True, sharey="row", figsize=(9, 9))
+        fig, ((ax_z, ax_fit_z), (ax_xy, ax_fit_xy)) = plt.subplots(
+            2, 2, sharex=True, sharey="row", figsize=(9, 9)
+        )
 
         # turn into nm
         precision_df = precision_df * 130
@@ -2745,7 +3002,9 @@ def plot_fit_df(fits_df, minscale=5e-1, minoffset=-1e-3):
     scale_col_z = ["sigma_z_scale"]
     offset_col = ["mort_x_offset", "sigma_x_offset", "mort_y_offset", "sigma_y_offset"]
     offset_col_z = ["sigma_z_offset"]
-    other_col = fits_df.columns.difference(scale_col + scale_col_z + offset_col + offset_col_z).tolist()
+    other_col = fits_df.columns.difference(
+        scale_col + scale_col_z + offset_col + offset_col_z
+    ).tolist()
 
     # set up plot
     fig, axs = plt.subplots(4, 4, sharex="row", sharey="row", figsize=(16, 16))
@@ -2776,18 +3035,26 @@ def plot_fit_df(fits_df, minscale=5e-1, minoffset=-1e-3):
     tab_ax0 = fig.add_axes((0.25, 0.25, 0.75, 0.25))
     tab_ax1 = fig.add_axes((0.25, 0, 0.75, 0.25))
 
-    for tab_ax, col in zip((tab_ax0, tab_ax1), (scale_col + scale_col_z, offset_col + offset_col_z + other_col)):
+    for tab_ax, col in zip(
+        (tab_ax0, tab_ax1), (scale_col + scale_col_z, offset_col + offset_col_z + other_col)
+    ):
         tab_ax.axis("off")
         dcsummary = filt_fits_df.describe().round(3)[col]
-        tab = tab_ax.table(cellText=dcsummary.values, colWidths=[0.15] * len(dcsummary.columns),
-                           rowLabels=dcsummary.index,
-                           colLabels=[fix_title(c) for c in dcsummary.columns],
-                           cellLoc='center', rowLoc='center',
-                           loc='center')
+        tab = tab_ax.table(
+            cellText=dcsummary.values,
+            colWidths=[0.15] * len(dcsummary.columns),
+            rowLabels=dcsummary.index,
+            colLabels=[fix_title(c) for c in dcsummary.columns],
+            cellLoc="center",
+            rowLoc="center",
+            loc="center",
+        )
         tab.scale(0.9, 2)
         tab.set_fontsize(16)
 
-    axs_scatter = pd.plotting.scatter_matrix(filt_fits_df[fits_df.columns.difference(other_col)], figsize=(20, 20))
+    axs_scatter = pd.plotting.scatter_matrix(
+        filt_fits_df[fits_df.columns.difference(other_col)], figsize=(20, 20)
+    )
 
     for ax in axs_scatter.ravel():
         ax.set_ylabel(fix_title(ax.get_ylabel()))
@@ -2796,7 +3063,15 @@ def plot_fit_df(fits_df, minscale=5e-1, minoffset=-1e-3):
     return (fig, axs), (ax.get_figure(), axs_scatter)
 
 
-def cluster(data, features=["x0", "y0"], scale=True, diagnostics=False, algorithm=HDBSCAN, copy_data=False, **kwargs):
+def cluster(
+    data,
+    features=["x0", "y0"],
+    scale=True,
+    diagnostics=False,
+    algorithm=HDBSCAN,
+    copy_data=False,
+    **kwargs
+):
     """
     Cluster PALM data based on given features
     
@@ -2826,7 +3101,16 @@ def cluster(data, features=["x0", "y0"], scale=True, diagnostics=False, algorith
     if diagnostics:
         with plt.style.context("dark_background"):
             fig, (ax0, ax1, ax2) = plt.subplots(3, figsize=(3, 9))
-            data.plot("x0", "y0", c="frame", edgecolor="w", linewidth=0.5, kind="scatter", cmap="gist_rainbow", ax=ax0)
+            data.plot(
+                "x0",
+                "y0",
+                c="frame",
+                edgecolor="w",
+                linewidth=0.5,
+                kind="scatter",
+                cmap="gist_rainbow",
+                ax=ax0,
+            )
             ax1.scatter(data.x0, data.y0, c=cluster.labels_, cmap="gist_rainbow")
             ax2.bar(np.unique(cluster.labels_), np.bincount(cluster.labels_ + 1))
 
@@ -2869,7 +3153,7 @@ def cutoffs(offtimes, percentiles):
     cp = 1 - percentiles
 
     # norm y
-    ynorm = (y / y[0])
+    ynorm = y / y[0]
 
     # find percentiles that will work with our data
     valid_cps = ((ynorm[:, None] < cp) & (ynorm[:, None] > np.zeros_like(cp))).any(0)
@@ -2932,7 +3216,7 @@ def test_point_cloud(df, *, drift=None, coords="xyz", diagnostics=False):
     # pull coordinates and sigmas
     x = [c + "0" for c in coords]
     s = ["sigma_" + c for c in coords]
-    
+
     def weighted_mean(df):
         """Weighted mean as defined here https://en.wikipedia.org/wiki/Weighted_arithmetic_mean#Statistical_properties"""
         if len(df) == 1:
@@ -2949,7 +3233,7 @@ def test_point_cloud(df, *, drift=None, coords="xyz", diagnostics=False):
     predicted_pos = np.random.randn(*real_pos.values.shape)
     if drift is not None:
         # add drift to localization precisions
-        sigmas = np.sqrt(sigmas**2 + drift[x].values**2)
+        sigmas = np.sqrt(sigmas ** 2 + drift[x].values ** 2)
 
     # update positions based on localization precision
     predicted_pos = predicted_pos * sigmas + weighted_mean(df)[x].values
@@ -2968,7 +3252,15 @@ def test_point_cloud(df, *, drift=None, coords="xyz", diagnostics=False):
     return min(ks_2samp(real_pos[c], predicted_pos[c]).pvalue for c in x)
 
 
-def get_onofftimes(samples, extract_radius, data=None, extract_fiducials=None, prune_radius=1, pvalue=None, drift=None):
+def get_onofftimes(
+    samples,
+    extract_radius,
+    data=None,
+    extract_fiducials=None,
+    prune_radius=1,
+    pvalue=None,
+    drift=None,
+):
     """Calculate onofftimes from samples"""
     if extract_fiducials is None:
         if data is None:
@@ -2984,12 +3276,18 @@ def get_onofftimes(samples, extract_radius, data=None, extract_fiducials=None, p
     if pvalue is not None:
         # keep if we cannot reject null hypothesis that they are singles
         logging.info("Filtering samples ...")
-        samples_blinks = [s for s in dask.delayed(samples_blinks).compute() if test_point_cloud(s, drift=drift, coords="xyz") > pvalue]
+        samples_blinks = [
+            s
+            for s in dask.delayed(samples_blinks).compute()
+            if test_point_cloud(s, drift=drift, coords="xyz") > pvalue
+        ]
     logging.info("Kept samples = {}%".format(int(len(samples_blinks) / n * 100)))
 
     # calculate on/off times
     logging.info("Calculating on and off times ... ")
-    onofftimes = dask.delayed([dask.delayed(on_off_times_fast)(y) for y in samples_blinks]).compute()
+    onofftimes = dask.delayed(
+        [dask.delayed(on_off_times_fast)(y) for y in samples_blinks]
+    ).compute()
 
     return onofftimes, samples_blinks
 
@@ -3021,7 +3319,9 @@ def plot_onofftimes(onofftimes, max_frame, axs=None, return_all=False):
     for i, (gap, cp) in enumerate(zip(*my_cutoffs)):
         line = mlines.Line2D([gap, gap, 0], [0, cp, cp], color="r")
         axs[0, 1].add_line(line)
-        _, _, _, blink_results = plot_blinks(gap, max_frame, onofftimes, density=True, ax=axs[1, 1], return_all=True)
+        _, _, _, blink_results = plot_blinks(
+            gap, max_frame, onofftimes, density=True, ax=axs[1, 1], return_all=True
+        )
         results.update({k + str(i): v for k, v in blink_results.items()})
 
     # calculate ratios
@@ -3035,7 +3335,7 @@ def plot_onofftimes(onofftimes, max_frame, axs=None, return_all=False):
     median = np.median(ratio)
     results["dynamic_contrast_ratio"] = median
     ax.axvline(median, ls=":", color="k", label="Median = {:.2g}".format(median))
-    ax.legend(loc='lower right')
+    ax.legend(loc="lower right")
 
     if return_all:
         return fig, axs, results
@@ -3056,7 +3356,9 @@ def plot_onofftimes2(onofftimes, samples_blinks, xlims=(1e3, 1e6), return_all=Fa
 
     # add cumulative distribution
     try:
-        _, _, ccdf_results = fit_and_plot_se_pl_ccdf(offtimes, ax=axs[0, -1], return_all=return_all)
+        _, _, ccdf_results = fit_and_plot_se_pl_ccdf(
+            offtimes, ax=axs[0, -1], return_all=return_all
+        )
     except Exception as e:
         # Make empty data for later if return_all requested
         ccdf_results = dict()
@@ -3075,9 +3377,16 @@ def plot_onofftimes2(onofftimes, samples_blinks, xlims=(1e3, 1e6), return_all=Fa
     return fig, axs
 
 
-def do_trace_analysis(palm_data, basetitle, samples, directory="./",
-                      fractions=np.logspace(-1, 0, 3), radii=(0.1, 0.2, 0.3, 0.4, 0.5),
-                      pvalue=None, drift=None):
+def do_trace_analysis(
+    palm_data,
+    basetitle,
+    samples,
+    directory="./",
+    fractions=np.logspace(-1, 0, 3),
+    radii=(0.1, 0.2, 0.3, 0.4, 0.5),
+    pvalue=None,
+    drift=None,
+):
     """Make and save trace analyses"""
     extract_fiducials = make_extract_fiducials_func(palm_data)
 
@@ -3089,8 +3398,14 @@ def do_trace_analysis(palm_data, basetitle, samples, directory="./",
         # iterate over radii
         for radius in radii:
             # extract samples
-            onofftimes, samples_blinks = get_onofftimes(new_samples, radius, extract_fiducials=extract_fiducials, prune_radius=1,
-                                                        pvalue=pvalue, drift=drift)
+            onofftimes, samples_blinks = get_onofftimes(
+                new_samples,
+                radius,
+                extract_fiducials=extract_fiducials,
+                prune_radius=1,
+                pvalue=pvalue,
+                drift=drift,
+            )
             # if basetitle isn't formated correctly then we want to fail here
             t = basetitle.format(radius, len(samples_blinks))
             # process samples
@@ -3106,7 +3421,9 @@ def do_trace_analysis(palm_data, basetitle, samples, directory="./",
                 fig.tight_layout()
                 fig.savefig(directory + t + ".png", dpi=300, bbox_inches="tight")
                 results.to_csv(directory + t + ".csv")
-                pd.concat([s.assign(group_id=i) for i, s in enumerate(samples_blinks)]).to_hdf(directory + t + ".h5", "samples")
+                pd.concat([s.assign(group_id=i) for i, s in enumerate(samples_blinks)]).to_hdf(
+                    directory + t + ".h5", "samples"
+                )
                 ontimes, offtimes = get_on_and_off_times(onofftimes)
                 pd.Series(ontimes, name="ontimes").to_hdf(directory + t + ".h5", "ontimes")
                 pd.Series(offtimes, name="offtimes").to_hdf(directory + t + ".h5", "offtimes")
@@ -3116,17 +3433,28 @@ def do_trace_analysis(palm_data, basetitle, samples, directory="./",
 def render_and_save(palm, directory):
     """Utility function to render and save PALM images"""
     for sxy in (0.1, 0.25):
-        for zp in (0.2, ):
+        for zp in (0.2,):
             for mag in (10, 25):
                 to_render = palm.grouped_nf[(palm.grouped_nf[["sigma_x", "sigma_y"]] < sxy).all(1)]
                 zmin, zmax = to_render.z0.quantile((zp, 1 - zp))
                 to_render = to_render[(zmin < to_render.z0) & (to_render.z0 < zmax)]
 
-                cimg = gen_img(palm.shape, to_render, mag=mag, diffraction_limit=True, zscaling=5 * 130)
+                cimg = gen_img(
+                    palm.shape, to_render, mag=mag, diffraction_limit=True, zscaling=5 * 130
+                )
                 cimg.zrange = np.array(cimg.zrange) / 1000
-                fig, ax = cimg.plot(norm_kwargs=dict(auto=True), subplots_kwargs=dict(figsize=(10, 8)))
+                fig, ax = cimg.plot(
+                    norm_kwargs=dict(auto=True), subplots_kwargs=dict(figsize=(10, 8))
+                )
 
-                fname = directory + "{} " + "{}X Grouped PALM Dim={}, r={:.2f}, gap={}, sxy lt {:.2f}".format(cimg.mag, 3, palm.group_radius, palm.group_gap, sxy) + "{}"
+                fname = (
+                    directory
+                    + "{} "
+                    + "{}X Grouped PALM Dim={}, r={:.2f}, gap={}, sxy lt {:.2f}".format(
+                        cimg.mag, 3, palm.group_radius, palm.group_gap, sxy
+                    )
+                    + "{}"
+                )
                 cimg.save_color(fname.format("Depthcoded", ".png"), auto=True)
                 cimg.save_alpha(fname.format("Alpha", ".tif"))
 
@@ -3172,7 +3500,11 @@ def calc_onframes(df):
     on_idx[0] = True
     on_frames = trace[on_idx]
 
-    return pd.DataFrame(data=np.stack((on_frames, np.arange(len(on_frames)) + 1)).T, columns=["frame", "occurrence"])
+    return pd.DataFrame(
+        data=np.stack((on_frames, np.arange(len(on_frames)) + 1)).T,
+        columns=["frame", "occurrence"],
+    )
+
 
 """
 # build tree for use later

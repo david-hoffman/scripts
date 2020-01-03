@@ -17,8 +17,7 @@ from skimage.exposure import adjust_gamma
 
 # make a new colormap that is like "Greys_r" but with an alpha chanel equal to
 # the greylevel
-greys_alpha_cm = ListedColormap([(i / 255,) * 3 + ((255 - i) / 255,)
-                                 for i in range(256)])
+greys_alpha_cm = ListedColormap([(i / 255,) * 3 + ((255 - i) / 255,) for i in range(256)])
 
 
 def exp(x, A, k, O):
@@ -26,7 +25,7 @@ def exp(x, A, k, O):
     return O + A * np.exp(-x / k)
 
 
-def recovery_plot(k, v, bg=100, p0=(-.1, 100, 1), num_tiles=16):
+def recovery_plot(k, v, bg=100, p0=(-0.1, 100, 1), num_tiles=16):
     """Plot the recovery of intensity
 
     Parameters
@@ -47,8 +46,9 @@ def recovery_plot(k, v, bg=100, p0=(-.1, 100, 1), num_tiles=16):
     fig : figure handle
     axs : axes handles"""
     # make figure
-    fig, axs = plt.subplots(1, 4, figsize=(4 * 3.3, 3),
-                            gridspec_kw=dict(width_ratios=(1, 1.3, 1, 1)))
+    fig, axs = plt.subplots(
+        1, 4, figsize=(4 * 3.3, 3), gridspec_kw=dict(width_ratios=(1, 1.3, 1, 1))
+    )
     (ax, ax_k, ax_h, ax_i) = axs
     my_shape = v.shape
     fig.suptitle(k, y=1.05)
@@ -58,8 +58,7 @@ def recovery_plot(k, v, bg=100, p0=(-.1, 100, 1), num_tiles=16):
     kinetics = img_split.mean((2, 3))
     norm_kinetics = kinetics / kinetics[:, np.newaxis].max(-1)
     xdata = np.arange(my_shape[0]) * 0.1 * 46
-    ks = np.array([curve_fit(exp, xdata, kin, p0=p0)[0][1]
-                   for kin in norm_kinetics])
+    ks = np.array([curve_fit(exp, xdata, kin, p0=p0)[0][1] for kin in norm_kinetics])
     kin_img = np.ones_like(img_split)[:, 0, ...] * ks[:, np.newaxis, np.newaxis]
     # plot kinetics, color by amount of bleaching and set alpha to initial intensity
     for trace, cpoint in zip(norm_kinetics, scale(ks)):
@@ -87,12 +86,11 @@ def recovery_plot(k, v, bg=100, p0=(-.1, 100, 1), num_tiles=16):
 
 
 def bleach_plot(k, v, bg=100.0):
-    fig, axs = plt.subplots(1, 2, figsize=(6, 3),
-                            gridspec_kw=dict(width_ratios=(1, 1.25)))
+    fig, axs = plt.subplots(1, 2, figsize=(6, 3), gridspec_kw=dict(width_ratios=(1, 1.25)))
     ax, ax_k = axs
     fig.suptitle(k, y=1)
     # calculate and norm kinetics on a per pixel basis
-    kinetics = (v * 1.0 - bg)
+    kinetics = v * 1.0 - bg
     kinetics[kinetics < 0] = np.nan
     kinetics /= np.nanmax(kinetics)
     # show max projection
@@ -170,7 +168,9 @@ def bleach_plot2(k, v, bg=100.0, num_tiles=16, gamma=0.5, dt=1):
     return fig, axs
 
 
-def gen_wavelength(center_wl, start_p=0, end_p=2048, center_p=1024, pix_size=0.0065, grating_pitch=300.0):
+def gen_wavelength(
+    center_wl, start_p=0, end_p=2048, center_p=1024, pix_size=0.0065, grating_pitch=300.0
+):
     """Generate a wavelength axis for spectroscopic data
 
     Parameters

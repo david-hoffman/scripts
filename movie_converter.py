@@ -14,8 +14,10 @@ import os
 
 new_ext = "_conv.mpg"
 
+
 def update_path(path):
     return path.replace(".mpg", new_ext)
+
 
 @dask.delayed
 def convert_file(path):
@@ -25,7 +27,7 @@ def convert_file(path):
     cap = cv2.VideoCapture(path)
     cap.retrieve()
     # set the codec (only one that works here)
-    fourcc = cv2.VideoWriter_fourcc(*'M1V1')
+    fourcc = cv2.VideoWriter_fourcc(*"M1V1")
 
     # begin loop
     out = None
@@ -37,7 +39,7 @@ def convert_file(path):
         # initialize for first iteration
         if out is None:
             # writer expects (width, height) tuple for shape
-            out =  cv2.VideoWriter(update_path(path), fourcc, 25.0, frame.shape[:2][::-1], True)
+            out = cv2.VideoWriter(update_path(path), fourcc, 25.0, frame.shape[:2][::-1], True)
         # write frame
         out.write(frame)
 
@@ -45,6 +47,7 @@ def convert_file(path):
     cap.release()
     out.release()
     return path
+
 
 def new_files():
     # filter out converted files
@@ -65,5 +68,6 @@ def main():
     # convert all files in the folder
     print(dask.delayed(list(map(convert_file, new_files()))).compute(scheduler="processes"))
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

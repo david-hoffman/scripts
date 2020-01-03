@@ -14,6 +14,7 @@ import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import ImageGrid
+
 # need subprocess to run commands
 import subprocess
 import hashlib
@@ -21,30 +22,40 @@ import tempfile
 import itertools as itt
 import dask
 from dask.diagnostics import ProgressBar
+
 # import our ability to read and write MRC files
 import Mrc
 
 from collections import OrderedDict, Sequence
+
 # import skimage components
 from peaks.peakfinder import PeakFinder
 
-from dphutils import (slice_maker, scale_uint16, fft_pad,
-                      radial_profile)
+from dphutils import slice_maker, scale_uint16, fft_pad, radial_profile
 from dphplotting import display_grid, mip
 from pyOTF.phaseretrieval import *
 from pyOTF.utils import *
+
 try:
-    from pyfftw.interfaces.numpy_fft import (fftshift, ifftshift, fftn, ifftn,
-                                             rfftn, fftfreq, rfftfreq)
+    from pyfftw.interfaces.numpy_fft import (
+        fftshift,
+        ifftshift,
+        fftn,
+        ifftn,
+        rfftn,
+        fftfreq,
+        rfftfreq,
+    )
     import pyfftw
+
     # Turn on the cache for optimum performance
     pyfftw.interfaces.cache.enable()
 except ImportError:
-    from numpy.fft import (fftshift, ifftshift, fftn, ifftn, rfftn, fftfreq,
-                           rfftfreq)
+    from numpy.fft import fftshift, ifftshift, fftn, ifftn, rfftn, fftfreq, rfftfreq
 from skimage.external import tifffile as tif
 
 import logging
+
 logger = logging.getLogger(__name__)
 
 
@@ -94,15 +105,13 @@ class PSFFinder(object):
         blobs_df.SNR = blobs_df.dropna().SNR.round().astype(int)
         # sort by SNR then sigma_x after filtering for unreasonably
         # large blobs and reindex data frame here
-        new_blobs_df = blobs_df[
-            blobs_df.sigma_x < max_s
-        ].sort_values(
-            ['amp', 'SNR', 'sigma_x'], ascending=[False, False, True]
-        ).reset_index(drop=True)
+        new_blobs_df = (
+            blobs_df[blobs_df.sigma_x < max_s]
+            .sort_values(["amp", "SNR", "sigma_x"], ascending=[False, False, True])
+            .reset_index(drop=True)
+        )
         # set the internal state to the selected blobs
-        my_PF.blobs = new_blobs_df[
-            ['y0', 'x0', 'sigma_x', 'amp']
-        ].values.astype(int)
+        my_PF.blobs = new_blobs_df[["y0", "x0", "sigma_x", "amp"]].values.astype(int)
         self.fits = new_blobs_df
 
     def find_window(self, blob_num=0):
@@ -117,14 +126,15 @@ class PSFFinder(object):
             # TODO: this should be refactored to use KDTrees
             # more than one blob find
             best = np.round(
-                self.fits.iloc[blob_num][['y0', 'x0', 'sigma_x', 'amp']].values
+                self.fits.iloc[blob_num][["y0", "x0", "sigma_x", "amp"]].values
             ).astype(int)
 
             def calc_r(blob1, blob2):
                 """Calc euclidean distance between blob1 and blob2"""
                 y1, x1, s1, a1 = blob1
                 y2, x2, s2, a2 = blob2
-                return np.sqrt((y1 - y2)**2 + (x1 - x2)**2)
+                return np.sqrt((y1 - y2) ** 2 + (x1 - x2) ** 2)
+
             # calc distances
             r = np.array([calc_r(best, blob) for blob in blobs])
             # find min distances
@@ -135,10 +145,7 @@ class PSFFinder(object):
                 r_min = r[1]
             except IndexError:
                 # make r_min the size of the image
-                r_min = min(
-                    np.concatenate((np.array(self.stack.shape[1:3]) - best[:2],
-                                    best[:2]))
-                )
+                r_min = min(np.concatenate((np.array(self.stack.shape[1:3]) - best[:2], best[:2])))
             # now window size equals sqrt or this
             win_size = int(round(2 * (r_min / np.sqrt(2) - best[2] * 3)))
 
@@ -150,8 +157,7 @@ class PSFFinder(object):
     def plot_all_windows(self):
         """Plot all the windows so that user can choose favorite"""
         windows = [self.find_window(i) for i in range(len(self.fits))]
-        fig, axs = display_grid({i: self.peakfinder.data[win]
-                                 for i, win in enumerate(windows)})
+        fig, axs = display_grid({i: self.peakfinder.data[win] for i, win in enumerate(windows)})
         return fig, axs
 
 
@@ -163,14 +169,7 @@ class PhaseRetriever(PSFFinder):
         psfwidth = wl / 4 / na / res
         super().__init__(stack, psfwidth, **kwargs)
         # initialize model params
-        self.params = dict(
-            na=na,
-            ni=ni,
-            wl=wl,
-            res=res,
-            zres=zres,
-            zsize=stack.shape[0]
-        )
+        self.params = dict(na=na, ni=ni, wl=wl, res=res, zres=zres, zsize=stack.shape[0])
 
     def retrieve_phase(self, blob_num=0, xysize=None, **kwargs):
         """"""
@@ -185,8 +184,7 @@ class PhaseRetriever(PSFFinder):
 class PSF2DProcessor(object):
     """An object for processing 2D PSFs and OTFs from 3D stacks"""
 
-    def __init__(self, stack, na=0.85, pixsize=0.13,
-                 det_wl=0.585, **kwargs):
+    def __init__(self, stack, na=0.85, pixsize=0.13, det_wl=0.585, **kwargs):
         """Find PSFs and turn them into OTFs
 
         Parameters
@@ -216,11 +214,11 @@ class PSF2DProcessor(object):
         img_raw = remove_bg(center_data(img_raw), 1.0)
         nz, ny, nx = img_raw.shape
         nr = max(ny, nx)
-        img = fft_pad(img_raw, (None, nr, nr), mode='constant')
+        img = fft_pad(img_raw, (None, nr, nr), mode="constant")
         return img
 
     def calc_infocus_psf(self, filter_kspace=True, filter_xspace=True):
-        '''Calculate the infocus psf'''
+        """Calculate the infocus psf"""
         psf = self._preprocess_stack()
         # recenter
         # TODO: add this part
@@ -228,7 +226,10 @@ class PSF2DProcessor(object):
         otf = fftshift(fftn(ifftshift(psf))).mean(0)
         # filter in k-space, if requested
         if filter_kspace or filter_xspace:
-            yy, xx = np.indices(otf.shape[-2:]) - np.array(otf.shape[-2:])[:, np.newaxis, np.newaxis] / 2
+            yy, xx = (
+                np.indices(otf.shape[-2:])
+                - np.array(otf.shape[-2:])[:, np.newaxis, np.newaxis] / 2
+            )
             r = np.hypot(yy, xx)
         if filter_kspace:
             # need to multiply be 1000 for the wavelength conversion (nm -> um)
@@ -254,16 +255,19 @@ class PSF2DProcessor(object):
         self.dkr = dkr
         # calculate the kspace cutoff, round up (that's what the 0.5 is for)
         diff_limit = 2 * self.na / (self.det_wl)
-        krcutoff = int(diff_limit / dkr + .5)
+        krcutoff = int(diff_limit / dkr + 0.5)
         if lf_cutoff is None:
             lf_cutoff = diff_limit * 0.025
-        lf_cutoff = int(lf_cutoff / dkr + .5)
+        lf_cutoff = int(lf_cutoff / dkr + 0.5)
         radprof = calc_radial_OTF(img, krcutoff, lf_cutoff, **kwargs)
 
         self.radprof = radprof
 
-        print('Better cutoff is {:.3f}'.format(
-            (abs(self.radprof[:krcutoff]).argmin() + 1) / (2 / (self.det_wl) / self.dkr)))
+        print(
+            "Better cutoff is {:.3f}".format(
+                (abs(self.radprof[:krcutoff]).argmin() + 1) / (2 / (self.det_wl) / self.dkr)
+            )
+        )
 
     def save_radOTF_mrc(self, output_filename, **kwargs):
         # make empty header
@@ -285,9 +289,7 @@ class PSF2DProcessor(object):
 
 
 class SIMOTF2D(PSFFinder):
-
-    def __init__(self, stack, na=0.85, pixsize=0.13,
-                 det_wl=0.585, **kwargs):
+    def __init__(self, stack, na=0.85, pixsize=0.13, det_wl=0.585, **kwargs):
         """Find PSFs and turn them into OTFs
 
         Parameters
@@ -308,7 +310,7 @@ class SIMOTF2D(PSFFinder):
         return self.psfproc.plot(**kwargs)
 
     def calc_infocus_psf(self, **kwargs):
-        '''Calculate the infocus psf'''
+        """Calculate the infocus psf"""
         self.psfproc.calc_infocus_psf(**kwargs)
         self.psf = self.psfproc.psf
 
@@ -321,7 +323,7 @@ class SIMOTF2D(PSFFinder):
 
 
 def save_PSF_mrc(img, output_filename, pixsize=0.0975, det_wl=520):
-    '''
+    """
     A small utility function to save an image of a bead as an MRC
 
     Parameters
@@ -334,29 +336,29 @@ def save_PSF_mrc(img, output_filename, pixsize=0.0975, det_wl=520):
         the the pixel size in microns (size of the sensor pixel at the sample)
     det_wl: float
         the detection wavelength
-    '''
+    """
 
     # TODO: make sure '.mrc' is appended to files that don't have it.
     from pysegtools.mrc import MRC
 
     ny, nx = img.shape
     PSFmrc = MRC(output_filename, nx=nx, ny=ny, dtype=img.dtype)
-    PSFmrc.header['nz'] = 1
+    PSFmrc.header["nz"] = 1
     PSFmrc[0] = img
-    PSFmrc.header['nwave'] = 1       # detection wavelength
-    PSFmrc.header['wave1'] = det_wl  # detection wavelength
+    PSFmrc.header["nwave"] = 1  # detection wavelength
+    PSFmrc.header["wave1"] = det_wl  # detection wavelength
     # need the rest of these fields filled out otherwise header won't write.
-    PSFmrc.header['wave2'] = 0
-    PSFmrc.header['wave3'] = 0
-    PSFmrc.header['wave4'] = 0
-    PSFmrc.header['wave5'] = 0
+    PSFmrc.header["wave2"] = 0
+    PSFmrc.header["wave3"] = 0
+    PSFmrc.header["wave4"] = 0
+    PSFmrc.header["wave5"] = 0
     # fill in the pixel size
-    PSFmrc.header['xlen'] = pixsize
-    PSFmrc.header['ylen'] = pixsize
+    PSFmrc.header["xlen"] = pixsize
+    PSFmrc.header["ylen"] = pixsize
 
     # need to delete this field to let MRC know that this is an oldstyle
     # header to write
-    del PSFmrc.header['cmap']
+    del PSFmrc.header["cmap"]
 
     # write the header and close the file.
     PSFmrc.write_header()
@@ -366,15 +368,15 @@ def save_PSF_mrc(img, output_filename, pixsize=0.0975, det_wl=520):
 
 
 def calc_radial_mrc(infile, outfile=None, na=0.85, L=8, H=22):
-    '''
+    """
     A simple wrapper around the radial OTF calc
-    '''
+    """
 
     # TODO: Error checking
     # make sure we have the absolute path
     infile = os.path.abspath(infile)
     if outfile is None:
-        outfile = infile.replace('.mrc', '_otf2d.mrc')
+        outfile = infile.replace(".mrc", "_otf2d.mrc")
     else:
         outfile = os.path.abspath(outfile)
 
@@ -388,16 +390,12 @@ def calc_radial_mrc(infile, outfile=None, na=0.85, L=8, H=22):
     # send to shell
     # os.system(excstr)
 
-    return_code = subprocess.call([
-                                  r'C:\newradialft\otf2d',
-                                  '-N', str(na),
-                                  '-L', str(L),
-                                  '-H', str(H),
-                                  infile,
-                                  outfile
-                                  ])
+    return_code = subprocess.call(
+        [r"C:\newradialft\otf2d", "-N", str(na), "-L", str(L), "-H", str(H), infile, outfile]
+    )
 
     return return_code
+
 
 # Here lie all the bits for processing a 3D otf, this code I'm not proud of at
 # all but it seems to work
@@ -436,7 +434,7 @@ def makematrix(nphases, norders):
     # phi is the phase step
     phi = 2 * np.pi / nphases
     # number of columns is determined by the number of orders
-    cols = (norders * 2 + 1)
+    cols = norders * 2 + 1
     # prepare an empty array to fill
     # this is very poor numpy coding but this will never be the bottleneck
     sep_mat = np.zeros(nphases * cols)
@@ -572,8 +570,7 @@ def mask_rad_prof(rad_prof, exp_args):
 
     Returns both the mask and the masked radial profile"""
     offsets = find_offsets(rad_prof)
-    masks = np.array([makemask(*exp_args, rad_prof.shape, offset=(o, 0))
-                      for o in offsets])
+    masks = np.array([makemask(*exp_args, rad_prof.shape, offset=(o, 0)) for o in offsets])
     mask = np.logical_or.reduce(masks, 0)
     return rad_prof * mask, mask
 
@@ -602,21 +599,20 @@ def average_pm_kz(data):
     # TODO: this part needs work!
     if nz % 2:
         # nz is odd
-        data_top = data[:nz // 2]
+        data_top = data[: nz // 2]
         # + 1 here in case nz odd
-        data_bottom = data[nz // 2 + 1:]
+        data_bottom = data[nz // 2 + 1 :]
         data_avg = (data_top + np.conj(data_bottom[::-1])) / 2
-        return np.concatenate((data_avg, data[np.newaxis, nz // 2],
-                               np.conj(data_avg[::-1])))
+        return np.concatenate((data_avg, data[np.newaxis, nz // 2], np.conj(data_avg[::-1])))
     else:
         # nz is even
-        data_top = data[1:nz // 2]
+        data_top = data[1 : nz // 2]
         # + 1 here in case nz odd
-        data_bottom = data[nz // 2 + 1:]
+        data_bottom = data[nz // 2 + 1 :]
         data_avg = (data_top + np.conj(data_bottom[::-1])) / 2
-        return np.concatenate((data[np.newaxis, 0], data_avg,
-                               data[np.newaxis, nz // 2],
-                               np.conj(data_avg[::-1])))
+        return np.concatenate(
+            (data[np.newaxis, 0], data_avg, data[np.newaxis, nz // 2], np.conj(data_avg[::-1]))
+        )
 
 
 class PSF3DProcessor(object):
@@ -643,21 +639,20 @@ class PSF3DProcessor(object):
         sep_data = self.separate_data()
         # center the data using the conventional psf center
         psf_max_loc = np.unravel_index(conv_psf.argmax(), conv_psf.shape)
-        cent_data = center_data(sep_data, (None, ) + psf_max_loc)
+        cent_data = center_data(sep_data, (None,) + psf_max_loc)
         # take rfft along spatial dimensions (get seperated OTFs)
         # last fftshift isn't performed along las axis, because it's the real
         # axis
-        self.cent_data_fft_sep = fftshift(rfftn(ifftshift(
-            cent_data, axes=(1, 2, 3)), axes=(1, 2, 3)), axes=(1, 2)
+        self.cent_data_fft_sep = fftshift(
+            rfftn(ifftshift(cent_data, axes=(1, 2, 3)), axes=(1, 2, 3)), axes=(1, 2)
         )
         self.avg_and_mask()
         # get spacings and save for later
         kzz, krr, self.dkz, self.dkr = _kspace_coords(dz, dr, self.masks[0].shape)
         # average bands (hard coded for convenience)
-        corrected_profs = np.array([
-            correct_phase_angle(b, m)
-            for b, m in zip(self.masked_rad_profs, self.masks)
-        ])
+        corrected_profs = np.array(
+            [correct_phase_angle(b, m) for b, m in zip(self.masked_rad_profs, self.masks)]
+        )
         band0 = corrected_profs[0]
         band1 = (corrected_profs[1] + corrected_profs[2]) / 2
         band2 = (corrected_profs[3] + corrected_profs[4]) / 2
@@ -676,7 +671,7 @@ class PSF3DProcessor(object):
         # dirs, combos, phases, z, y, x
         sep_mat = sep_mat[np.newaxis, :, :, np.newaxis, np.newaxis, np.newaxis]
         # this multiplication recombines each phase image
-        temp_data = (self.data_nobg[:, np.newaxis] * sep_mat)
+        temp_data = self.data_nobg[:, np.newaxis] * sep_mat
         # sum the weighted images (linear combination) and take mean along
         # directions
         self.sep_data = temp_data.sum(2).mean(0)
@@ -689,10 +684,9 @@ class PSF3DProcessor(object):
         # because of real fft
         center = ((self.ny + 1) // 2, 0)
         extent = self.nx // 2 + 1
-        self.r_3D = r_3D = np.array([
-            [radial_profile(o, center)[0][:extent]
-             for o in z] for z in self.cent_data_fft_sep
-        ])
+        self.r_3D = r_3D = np.array(
+            [[radial_profile(o, center)[0][:extent] for o in z] for z in self.cent_data_fft_sep]
+        )
         # mask OTFs and retrieve masks
         self.masked_rad_profs, masks = np.swapaxes(
             np.array([mask_rad_prof(r, self.exp_args) for r in r_3D]), 0, 1
@@ -720,7 +714,7 @@ class PSF3DProcessor(object):
 
 
 def simrecon(*, input_file, output_file, otf_file, **kwargs):
-    '''
+    """
     A simple wrapper to Lin's sirecon.exe
 
     Parameters
@@ -840,7 +834,7 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
         save drift-corrected raw images into file
     saveoverlaps: path
         save overlaps by makeoverlaps() into file
-    '''
+    """
 
     # make sure the paths are absolute paths
     input_file = os.path.abspath(input_file)
@@ -856,111 +850,115 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
 
     # the list to pass to subprocess.call, this is just the beginning
     # execute in powershell
-    exc_list = [r'C:\SIMrecon_svn\sirecon', input_file, output_file, otf_file]
-    
+    exc_list = [r"C:\SIMrecon_svn\sirecon", input_file, output_file, otf_file]
+
     # insert default values into **kwargs here
-    valid_kwargs = OrderedDict.fromkeys((
-        'ndirs',
-        'nphases',
-        '2lenses',
-        'bessel',
-        'fastSIM',
-        'recalcarray',
-        'inputapo',
-        'nordersout',
-        'forcemodamp',
-        'nok0search',
-        'nokz0',
-        'k0searchAll',
-        'k0angles',
-        'fitonephase',
-        'noapodizeout',
-        'gammaApo',
-        'preciseapo',
-        'zoomfact',
-        'zzoom',
-        'zpadto',
-        'explodefact',
-        'nofilteroverlaps',
-        'nosuppress',
-        'suppressR',
-        'dampenOrder0',
-        'noOrder0',
-        'noequalize',
-        'equalizez',
-        'equalizet',
-        'wiener',
-        'wienerInr',
-        'background',
-        'bgInExtHdr',
-        'otfRA',
-        'driftfix',
-        'driftHPcutoff',
-        'fix2Ddrift',
-        'fixphasestep',
-        'noff',
-        'usecorr',
-        'angle0',
-        'negDangle',
-        'ls',
-        'na',
-        'nimm',
-        'saveprefiltered',
-        'savealignedraw',
-        'saveoverlaps'
-    ))
+    valid_kwargs = OrderedDict.fromkeys(
+        (
+            "ndirs",
+            "nphases",
+            "2lenses",
+            "bessel",
+            "fastSIM",
+            "recalcarray",
+            "inputapo",
+            "nordersout",
+            "forcemodamp",
+            "nok0search",
+            "nokz0",
+            "k0searchAll",
+            "k0angles",
+            "fitonephase",
+            "noapodizeout",
+            "gammaApo",
+            "preciseapo",
+            "zoomfact",
+            "zzoom",
+            "zpadto",
+            "explodefact",
+            "nofilteroverlaps",
+            "nosuppress",
+            "suppressR",
+            "dampenOrder0",
+            "noOrder0",
+            "noequalize",
+            "equalizez",
+            "equalizet",
+            "wiener",
+            "wienerInr",
+            "background",
+            "bgInExtHdr",
+            "otfRA",
+            "driftfix",
+            "driftHPcutoff",
+            "fix2Ddrift",
+            "fixphasestep",
+            "noff",
+            "usecorr",
+            "angle0",
+            "negDangle",
+            "ls",
+            "na",
+            "nimm",
+            "saveprefiltered",
+            "savealignedraw",
+            "saveoverlaps",
+        )
+    )
     numeric = (int, float)
-    valid_kwargs.update({
-        'ndirs': int,
-        'nphases': int,
-        'phaselist': Sequence,
-        '2lenses': bool,
-        'bessel': bool,
-        'fastSIM': bool,
-        'recalcarray': int,
-        'inputapo': int,
-        'forcemodamp': Sequence,
-        'nok0search': bool,
-        'nokz0': bool,
-        'k0searchAll': bool,
-        'k0angles': Sequence,
-        'fitonephase': bool,
-        'noapodizeout': bool,
-        'gammaApo': float,
-        'preciseapo': bool,
-        'zoomfact': numeric,
-        'zzoom': float,
-        'zpadto': int,
-        'explodefact': float,
-        'nofilteroverlaps': bool,
-        'nosuppress': bool,
-        'suppressR': numeric,
-        'dampenOrder0': bool,
-        'noOrder0': bool,
-        'noequalize': bool,
-        'equalizez': bool,
-        'equalizet': bool,
-        'wiener': float,
-        'wienerInr': float,
-        'background': numeric,
-        'bgInExtHdr': bool,
-        'otfRA': bool,
-        'driftfix': bool,
-        'driftHPcutoff': float,
-        'fix2Ddrift': bool,
-        'fixphasestep': bool,
-        'noff': int,
-        'usecorr': 'path',
-        'nordersout': int,
-        'angle0': float,
-        'negDangle': bool,
-        'ls': float,
-        'na': float,
-        'nimm': float,
-        'saveprefiltered': 'path',
-        'savealignedraw': 'path',
-        'saveoverlaps': 'path'
-    })
+    valid_kwargs.update(
+        {
+            "ndirs": int,
+            "nphases": int,
+            "phaselist": Sequence,
+            "2lenses": bool,
+            "bessel": bool,
+            "fastSIM": bool,
+            "recalcarray": int,
+            "inputapo": int,
+            "forcemodamp": Sequence,
+            "nok0search": bool,
+            "nokz0": bool,
+            "k0searchAll": bool,
+            "k0angles": Sequence,
+            "fitonephase": bool,
+            "noapodizeout": bool,
+            "gammaApo": float,
+            "preciseapo": bool,
+            "zoomfact": numeric,
+            "zzoom": float,
+            "zpadto": int,
+            "explodefact": float,
+            "nofilteroverlaps": bool,
+            "nosuppress": bool,
+            "suppressR": numeric,
+            "dampenOrder0": bool,
+            "noOrder0": bool,
+            "noequalize": bool,
+            "equalizez": bool,
+            "equalizet": bool,
+            "wiener": float,
+            "wienerInr": float,
+            "background": numeric,
+            "bgInExtHdr": bool,
+            "otfRA": bool,
+            "driftfix": bool,
+            "driftHPcutoff": float,
+            "fix2Ddrift": bool,
+            "fixphasestep": bool,
+            "noff": int,
+            "usecorr": "path",
+            "nordersout": int,
+            "angle0": float,
+            "negDangle": bool,
+            "ls": float,
+            "na": float,
+            "nimm": float,
+            "saveprefiltered": "path",
+            "savealignedraw": "path",
+            "saveoverlaps": "path",
+        }
+    )
 
     # update kwargs with those passed by user and generate the list.
     for k, kw_type in valid_kwargs.items():
@@ -971,12 +969,16 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
             pass
         else:
             # test validity
-            if kw_type == 'path':
+            if kw_type == "path":
                 pass
             else:
-                assert isinstance(kw_value, kw_type), '{} is type {} and should have been type {}'.format(k, type(kw_value), repr(kw_type))
+                assert isinstance(
+                    kw_value, kw_type
+                ), "{} is type {} and should have been type {}".format(
+                    k, type(kw_value), repr(kw_type)
+                )
             if kw_type is not bool:
-                exc_list.append('-' + k)
+                exc_list.append("-" + k)
                 # exc_list.append('-' + k)
                 if isinstance(kw_value, Sequence) and not isinstance(kw_value, str):
                     for v in kw_value:
@@ -987,21 +989,18 @@ def simrecon(*, input_file, output_file, otf_file, **kwargs):
                 # in this case the key word is a bool
                 # test if bool is true
                 if kw_value:
-                    exc_list.append('-' + k)
+                    exc_list.append("-" + k)
 
     # save the output
     return_code = subprocess.run(
-        exc_list,
-        shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
+        exc_list, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
     if return_code.stderr:
         logger.error(return_code.stderr.decode())
         logger.error(" ".join(exc_list))
     else:
         logger.debug(" ".join(exc_list))
-    return return_code.stdout.decode('utf-8').split('\n')
+    return return_code.stdout.decode("utf-8").split("\n")
 
 
 def formatter(value):
@@ -1015,9 +1014,8 @@ def write_mrc(input_file):
     raise NotImplementedError
 
 
-def calc_radial_OTF(psf, krcutoff=None, lf_cutoff=None, width=3,
-                    show_OTF=False):
-    '''
+def calc_radial_OTF(psf, krcutoff=None, lf_cutoff=None, width=3, show_OTF=False):
+    """
     Calculate radially averaged OTF given a PSF and a cutoff value.
 
     This is designed to work well with Lin's SIMRecon software
@@ -1040,7 +1038,7 @@ def calc_radial_OTF(psf, krcutoff=None, lf_cutoff=None, width=3,
     -------
     radprof: ndarray, 1-dim, complex
         Radially averaged OTF
-    '''
+    """
     # assumes background has already been removed from PSF
     # recenter
     # TODO: add this part
@@ -1050,6 +1048,7 @@ def calc_radial_OTF(psf, krcutoff=None, lf_cutoff=None, width=3,
     if show_OTF:
         from dphplotting import slice_plot
         from matplotlib.colors import LogNorm
+
         # this is still wrong, need to do the mean before summing
         # really we need a slice function.
         slice_plot(abs(otf), norm=LogNorm())
@@ -1060,7 +1059,7 @@ def calc_radial_OTF(psf, krcutoff=None, lf_cutoff=None, width=3,
 
     center = np.array(otf.shape) / 2
 
-    radprof, _ = radial_profile(otf)[:int(center[0] + 1)]
+    radprof, _ = radial_profile(otf)[: int(center[0] + 1)]
     if krcutoff is not None:
         # calculate mean phase angle of data within diffraction limit
         temp = radprof[:krcutoff]
@@ -1091,8 +1090,8 @@ def calc_radial_OTF(psf, krcutoff=None, lf_cutoff=None, width=3,
     return radprof
 
 
-def crop_mrc(fullpath, window=None, extension='_cropped'):
-    '''
+def crop_mrc(fullpath, window=None, extension="_cropped"):
+    """
     Small utility to crop MRC files
 
     Parameters
@@ -1106,37 +1105,38 @@ def crop_mrc(fullpath, window=None, extension='_cropped'):
     -------
     croppath : path
         path to cropped file
-    '''
+    """
     # open normal MRC file
     oldmrc = Mrc.Mrc(fullpath)
     old_data = oldmrc.data
     # make the crop path
-    croppath = fullpath.replace('.mrc', extension + '.mrc')
+    croppath = fullpath.replace(".mrc", extension + ".mrc")
     # crop window
     if window is None:
         nz, ny, nx = old_data.shape
-        window = [slice(None, None, None)] + slice_maker(ny // 2, nx // 2,
-                                                         max(ny, nx) // 2)
+        window = [slice(None, None, None)] + slice_maker(ny // 2, nx // 2, max(ny, nx) // 2)
     # prepare a new file to write to
-    Mrc.save(old_data[window], croppath, ifExists='overwrite', hdr=oldmrc.hdr)
+    Mrc.save(old_data[window], croppath, ifExists="overwrite", hdr=oldmrc.hdr)
     # close the old MRC file.
     oldmrc.close()
     del oldmrc
     return croppath
 
+
 # split, process, recombine functions
 
 
 def split_img(img, side):
-    '''
+    """
     A utility to split a SIM stack into substacks
-    '''
+    """
 
     # Testing input
     divisor = img.shape[-1] // side
     # Error checking
-    assert side == img.shape[-1] / divisor, 'Side {}, not equal to {}/{}'.format(
-        side, img.shape[-1], divisor)
+    assert side == img.shape[-1] / divisor, "Side {}, not equal to {}/{}".format(
+        side, img.shape[-1], divisor
+    )
     assert img.shape[-2] == img.shape[-1]
     assert img.shape[-1] % divisor == 0
 
@@ -1145,33 +1145,35 @@ def split_img(img, side):
     # roll one axis so that the tile's y, x coordinates are next to each other
     img_s1 = np.rollaxis(img_s0, -3, -1)
     # combine the tile's y, x coordinates into one axis.
-    img_s2 = img_s1.reshape(-1, divisor**2, side, side)
+    img_s2 = img_s1.reshape(-1, divisor ** 2, side, side)
     # roll axis so that we can easily iterate through tiles
     return np.rollaxis(img_s2, 1, 0)
 
 
 def combine_img(img_stack):
-    '''
+    """
     A utility to combine a processed stack.
-    '''
+    """
     if img_stack.ndim < 4:
         # extend array
         img_stack = img_stack[:, None]
     num_sub_imgs, zlen, ylen, xlen = img_stack.shape
-    assert xlen == ylen, '{} != {}'.format(xlen, ylen)
+    assert xlen == ylen, "{} != {}".format(xlen, ylen)
     sqrt_num_sub_imgs = np.sqrt(num_sub_imgs)
     divisor = int(sqrt_num_sub_imgs)
     assert sqrt_num_sub_imgs == divisor, "{} != {}".format(sqrt_num_sub_imgs, divisor)
 
     # move z to front
     img_stack = np.rollaxis(img_stack, 1)
-    return np.squeeze(np.rollaxis(
-        img_stack.reshape(zlen, divisor, divisor, ylen, xlen), 2, 4
-    ).reshape(zlen, ylen * divisor, xlen * divisor))
+    return np.squeeze(
+        np.rollaxis(img_stack.reshape(zlen, divisor, divisor, ylen, xlen), 2, 4).reshape(
+            zlen, ylen * divisor, xlen * divisor
+        )
+    )
 
 
-def split_img_with_padding(img, side, pad_width, mode='reflect'):
-    '''Split SIM stack into sub-stacks with padding of pad_width'''
+def split_img_with_padding(img, side, pad_width, mode="reflect"):
+    """Split SIM stack into sub-stacks with padding of pad_width"""
     # if no padding revert to simpler function.
     if pad_width == 0:
         return split_img(img, side)
@@ -1193,17 +1195,17 @@ def split_img_with_padding(img, side, pad_width, mode='reflect'):
     pad_img = np.pad(img, padding, mode)
     # split the image into padded sub-images
     # don't use an array, so that we can be memory efficient
-    split_pad_img = [pad_img[...,
-                            j * side:pad_width + (j + 1) * side,
-                            i * side:pad_width + (i + 1) * side]
-                        for j in tqdm.tnrange(ny // side)
-                        for i in range(nx // side)]
+    split_pad_img = [
+        pad_img[..., j * side : pad_width + (j + 1) * side, i * side : pad_width + (i + 1) * side]
+        for j in tqdm.tnrange(ny // side)
+        for i in range(nx // side)
+    ]
     # return this
     return split_pad_img
 
 
 def cosine_edge(pad_size):
-    '''
+    """
     Generates a cosine squared edge
 
     When added to its reverse it equals 1
@@ -1224,13 +1226,13 @@ def cosine_edge(pad_size):
     >>> rev_edge = edge[::-1]
     >>> np.allclose(edge + rev_edge, np.ones_like(edge))
     True
-    '''
+    """
     x = np.arange(pad_size)
-    return np.sin(np.pi * x / (pad_size - 1) / 2)**2
+    return np.sin(np.pi * x / (pad_size - 1) / 2) ** 2
 
 
 def linear_edge(pad):
-    '''
+    """
     Generates a linear edge
 
     When added to its reverse it equals 1
@@ -1251,12 +1253,12 @@ def linear_edge(pad):
     >>> rev_edge = edge[::-1]
     >>> np.allclose(edge + rev_edge, np.ones_like(edge))
     True
-    '''
+    """
     return np.arange(pad) / (pad - 1)
 
 
 def edge_window(center_size, edge_size, window_func=cosine_edge):
-    '''
+    """
     Generate a 1D window that ramps up through the padded region and is flat in
     the middle
 
@@ -1271,16 +1273,15 @@ def edge_window(center_size, edge_size, window_func=cosine_edge):
     -------
     edge_window : ndarray (1D)
         a window with a rising and falling edge
-    '''
+    """
     center_part = np.ones(center_size)
     left_part = window_func(edge_size)
     right_part = left_part[::-1]
     return np.concatenate((left_part, center_part, right_part))
 
 
-def extend_and_window_tile(tile, pad_size, tile_num, num_tiles,
-                           window_func=cosine_edge):
-    '''
+def extend_and_window_tile(tile, pad_size, tile_num, num_tiles, window_func=cosine_edge):
+    """
     Function that takes a tile that has been padded and its tile number and
     places it in the correct space of the overall image and windows the
     function before padding with zeros
@@ -1302,7 +1303,7 @@ def extend_and_window_tile(tile, pad_size, tile_num, num_tiles,
     -------
     tile : ndarray
         A tile that has been windowed and then extended to the appropriate size
-    '''
+    """
     # calculate the total number of tiles in the x and y directions
     # (assumes square image)
     ytot = xtot = int(np.sqrt(num_tiles))
@@ -1329,7 +1330,7 @@ def extend_and_window_tile(tile, pad_size, tile_num, num_tiles,
     # reshape window so that it works for 3D and for time
     # note that this still only tiles in 2D and not a full
     # 3D tiling.
-    win_2d.shape = (1, ) * (tile.ndim - 2) + win_2d.shape
+    win_2d.shape = (1,) * (tile.ndim - 2) + win_2d.shape
 
     # calculate the before and after padding for each direction
     ybefore = yn * to_pad
@@ -1344,7 +1345,7 @@ def extend_and_window_tile(tile, pad_size, tile_num, num_tiles,
 
 
 def combine_img_with_padding(img_stack, pad_width):
-    '''Reverse of split_img_with_padding'''
+    """Reverse of split_img_with_padding"""
     if pad_width == 0:
         return combine_img(img_stack)
     assert pad_width % 2 == 0, "Padding must be even"
@@ -1358,12 +1359,12 @@ def combine_img_with_padding_window(recon_split_data, padding, window_func=cosin
     num_tiles = recon_split_data.shape[0]
     # figure out the new data size from inputs
     # get unpadded yx size of data
-    newdata_shape = (np.array(recon_split_data.shape[-2:]) - padding * zoom)
+    newdata_shape = np.array(recon_split_data.shape[-2:]) - padding * zoom
     # find number of tiles per side
     newdata_shape *= int(np.sqrt(num_tiles))
     # then increasee by padding and potential zoom factor
     newdata_shape += padding * zoom
-    
+
     if recon_split_data.ndim == 4:
         # 3D data
         newdata_shape = recon_split_data.shape[1:2] + tuple(newdata_shape)
@@ -1372,29 +1373,33 @@ def combine_img_with_padding_window(recon_split_data, padding, window_func=cosin
         pass
     else:
         raise RuntimeError("Unexpected data shape = {}".format(recon_split_data.shape))
-    
+
     to_combine_data = np.zeros(newdata_shape, dtype=float)
-    
+
     for i, d in tqdm.tqdm_notebook(enumerate(recon_split_data), "Recombining", num_tiles, False):
-        current_tile, slices = extend_and_window_tile(d, padding * zoom, i, num_tiles, window_func=window_func)
+        current_tile, slices = extend_and_window_tile(
+            d, padding * zoom, i, num_tiles, window_func=window_func
+        )
         to_combine_data[slices] += current_tile
-    
+
     # we need to get rid of the reflected bits
     edge_pix = (padding // 2) * zoom
     slc = slice(edge_pix, -edge_pix, None)
-    
+
     # cut them here.
     return to_combine_data[..., slc, slc]
 
 
-def split_process_recombine(fullpath, tile_size, padding, sim_kwargs, bg_estimate=None, window_func=cosine_edge):
-    '''
+def split_process_recombine(
+    fullpath, tile_size, padding, sim_kwargs, bg_estimate=None, window_func=cosine_edge
+):
+    """
     Method that splits then processes and then recombines images
 
     Returns
     -------
     total_save_path, sirecon_ouput
-    '''
+    """
     assert tile_size >= padding, "Tile size must be smaller than padding"
     # make copy so internals don't change.
     sim_kwargs = sim_kwargs.copy()
@@ -1410,7 +1415,7 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs, bg_estimat
     old_data = oldmrc.data
     # generate hex hash, will use as ID
     sha = hashlib.md5(old_data).hexdigest()
-    sim_kwargs['sha'] = sha
+    sim_kwargs["sha"] = sha
     # split the data
     split_data = split_img_with_padding(old_data, tile_size, padding)
     num_tiles = len(split_data)
@@ -1421,31 +1426,29 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs, bg_estimat
     with tempfile.TemporaryDirectory(dir="F:/") as dir_name:
         # save split data
         sirecon_ouput = []
-        
+
         @dask.delayed
         def save_process(data, savepath, sim_kwargs):
-            Mrc.save(data, savepath, hdr=oldmrc.hdr, ifExists='overwrite')
+            Mrc.save(data, savepath, hdr=oldmrc.hdr, ifExists="overwrite")
             return simrecon(**sim_kwargs)
-        
+
         for i, data in enumerate(tqdm.tqdm_notebook(split_data, "Splitting and saving data")):
             # save subimages in sub folder, use sha as ID
-            savepath = os.path.join(dir_name,
-                                    'sub_image{:06d}_{}.mrc'.format(i, sha))
-            
-            if bg_estimate == 'min':
+            savepath = os.path.join(dir_name, "sub_image{:06d}_{}.mrc".format(i, sha))
+
+            if bg_estimate == "min":
                 bgs[i] = data.min()
-            elif bg_estimate == 'median':
+            elif bg_estimate == "median":
                 bgs[i] = np.median(data)
-            elif bg_estimate == 'mode':
+            elif bg_estimate == "mode":
                 bgs[i] = np.argmax(np.bincount(data.ravel()))
 
             # update the kwargs to have the input file.
-            sim_kwargs.update({
-                'input_file': savepath,
-                'output_file': savepath.replace('.mrc', '_proc.mrc')
-            })
+            sim_kwargs.update(
+                {"input_file": savepath, "output_file": savepath.replace(".mrc", "_proc.mrc")}
+            )
             if bg_estimate:
-                sim_kwargs['background'] = float(bgs[i])
+                sim_kwargs["background"] = float(bgs[i])
 
             sirecon_ouput.append(save_process(data, savepath, sim_kwargs))
 
@@ -1453,11 +1456,11 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs, bg_estimat
             # process files
             sirecon_ouput = list(itt.chain.from_iterable(dask.delayed(sirecon_ouput).compute()))
         # read in processed data
-        processed_paths = sorted(glob.glob(dir_name + '/sub_image*_{}_proc.mrc'.format(sha)))
-        
+        processed_paths = sorted(glob.glob(dir_name + "/sub_image*_{}_proc.mrc".format(sha)))
+
         @dask.delayed
         def safe_read(path):
-            '''Catch errors for threaded read'''
+            """Catch errors for threaded read"""
             try:
                 return Mrc.Mrc(path).data
             except ValueError:
@@ -1466,7 +1469,7 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs, bg_estimat
         # read in data
         recon_split_data = dask.compute(*[safe_read(path) for path in processed_paths])
         valid_paths = [p for d, p in zip(recon_split_data, processed_paths) if d is not None]
-        
+
         # Check all shapes
         all_shapes = set(map(np.shape, filter(lambda x: x is not None, recon_split_data)))
         if len(all_shapes) != 1:
@@ -1475,31 +1478,40 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs, bg_estimat
         shape = all_shapes.pop()
 
         # recombine data
-        recon_split_data = np.asarray([d if d is not None else np.zeros(shape, dtype='float32') for d in recon_split_data]).squeeze()
+        recon_split_data = np.asarray(
+            [d if d is not None else np.zeros(shape, dtype="float32") for d in recon_split_data]
+        ).squeeze()
         if window_func is None or padding == 0:
-            #remember the data density is doubled so padding is too
+            # remember the data density is doubled so padding is too
             recon_split_data_combine = combine_img_with_padding(recon_split_data, padding * zoom)
         else:
-            to_combine_data = combine_img_with_padding_window(recon_split_data, padding, window_func, zoom)
+            to_combine_data = combine_img_with_padding_window(
+                recon_split_data, padding, window_func, zoom
+            )
             recon_split_data_combine = to_combine_data.astype(np.float32)
             # make sure the new data is the right shape
             oldy, oldx = old_data.shape[-2:]
             newy, newx = recon_split_data_combine.shape[-2:]
             assert newx == oldx * zoom, "X-dim: {} != {}".format(newx, oldx * zoom)
             assert newy == oldy * zoom, "Y-dim: {} != {}".format(newy, oldy * zoom)
-        
+
         # save data
         # path is the last tile we read in, it has all the relevant metadata
         temp_mrc = Mrc.Mrc(valid_paths[-1])
         extension = "_tile{}_pad{}.mrc".format(tile_size, padding)
-        total_save_path = outname.replace('.mrc', extension)
-        Mrc.save(recon_split_data_combine, os.path.abspath(total_save_path), hdr=temp_mrc.hdr, ifExists='overwrite')
+        total_save_path = outname.replace(".mrc", extension)
+        Mrc.save(
+            recon_split_data_combine,
+            os.path.abspath(total_save_path),
+            hdr=temp_mrc.hdr,
+            ifExists="overwrite",
+        )
         # clean up
         oldmrc.close()
         del oldmrc
         temp_mrc.close()
         del temp_mrc
-    
+
     # directory is killed automatically.
 
     return total_save_path, sirecon_ouput
@@ -1508,19 +1520,19 @@ def split_process_recombine(fullpath, tile_size, padding, sim_kwargs, bg_estimat
 def process_txt_output(txt_buffer):
     """Take output from above and parse into angles"""
     # ndirs is special
-    ndir_re = re.compile(r'(?<=ndirs=)\d+', flags=re.M)
+    ndir_re = re.compile(r"(?<=ndirs=)\d+", flags=re.M)
     my_dirs = set(re.findall(ndir_re, txt_buffer))
     assert len(my_dirs) == 1, "my_dirs = {}".format(my_dirs)
     ndirs = int(my_dirs.pop())
     # compile the regexes
     re_dict = dict(
-        angle=r'(?:amplitude:\n In.*)(?<=angle=)(-?\d+\.\d+)',
-        mag=r'(?:amplitude:\n In.*)(?<=mag=)(-?\d+\.\d+)',
-        amp=r'(?:amplitude:\n In.*)(?<=amp=)(-?\d+\.\d+)',
-        phase=r'(?:amplitude:\n In.*)(?<=phase=)(-?\d+\.\d+)',
-        ramp=r'(?:amplitude:\n In.*\n Reverse.*)(?<=amp=)(-?\d+\.\d+)',
-        camp=r'(?:amplitude:\n In.*\n.*\n Combined.*)(?<=amp=)(-?\d+\.\d+)',
-        ccoef=r'(?:amplitude:\n In.*\n.*\n.*\n Correlation.*)(-?\d+\.\d+)'
+        angle=r"(?:amplitude:\n In.*)(?<=angle=)(-?\d+\.\d+)",
+        mag=r"(?:amplitude:\n In.*)(?<=mag=)(-?\d+\.\d+)",
+        amp=r"(?:amplitude:\n In.*)(?<=amp=)(-?\d+\.\d+)",
+        phase=r"(?:amplitude:\n In.*)(?<=phase=)(-?\d+\.\d+)",
+        ramp=r"(?:amplitude:\n In.*\n Reverse.*)(?<=amp=)(-?\d+\.\d+)",
+        camp=r"(?:amplitude:\n In.*\n.*\n Combined.*)(?<=amp=)(-?\d+\.\d+)",
+        ccoef=r"(?:amplitude:\n In.*\n.*\n.*\n Correlation.*)(-?\d+\.\d+)",
     )
     re_dict = {k: re.compile(v, flags=re.M) for k, v in re_dict.items()}
     # parse output
@@ -1531,7 +1543,7 @@ def process_txt_output(txt_buffer):
     length = shapes.pop()[0]
     assert length != 0
     nx = ny = int(np.sqrt(length // ndirs))
-    assert length == nx * ny * ndirs, '{} == {} * {} * {}'.format(length, ndirs, nx, ny)
+    assert length == nx * ny * ndirs, "{} == {} * {} * {}".format(length, ndirs, nx, ny)
     # reshape all
     parse_dict = {k: v.reshape(nx, ny, ndirs) for k, v in parse_dict.items()}
     parse_dict = {k: np.swapaxes(v, 0, -1) for k, v in parse_dict.items()}
@@ -1544,11 +1556,11 @@ def plot_params(data_dict):
     First three define a wavevector
     """
     mapping = {
-        "angle": 'Pattern Angle',
-        "phase": 'Pattern Phase',
-        "mag": 'Pattern Spacing (µm)',
-        "amp": 'Modulation Amplitude',
-        "ccoef": 'Correlation Coefficient'
+        "angle": "Pattern Angle",
+        "phase": "Pattern Phase",
+        "mag": "Pattern Spacing (µm)",
+        "amp": "Modulation Amplitude",
+        "ccoef": "Correlation Coefficient",
     }
 
     # set up figure
@@ -1557,7 +1569,7 @@ def plot_params(data_dict):
     fig = plt.figure(dpi=150, figsize=(norients * 3, nparams * 3))
     grid = ImageGrid(
         fig,
-        111, 
+        111,
         nrows_ncols=(nparams, norients),
         axes_pad=0.1,
         cbar_mode="edge",
@@ -1570,39 +1582,39 @@ def plot_params(data_dict):
     for row, key, cbar in zip(grid.axes_row, keys, grid.cbar_axes):
         # pull data
         data = data_dict[key]
-        
+
         if key == "mag":
             # flip to line spacing
             data = 1 / data
-        
+
         # set up keywords
         kwds = dict(vmin=data.min(), vmax=data.max(), cmap="inferno")
-        
+
         # specialize
         if "angle" == key:
             kwds = dict()
         elif "phase" == key:
             kwds = dict(vmin=data.min(), vmax=data.max(), cmap="coolwarm")
-        
+
         for ax, d in zip(row, data):
             im = ax.matshow(d, **kwds)
             ax.xaxis.set_major_locator(plt.NullLocator())
             ax.yaxis.set_major_locator(plt.NullLocator())
             if key == "angle":
                 ax.set_title("{:.1f} Degrees".format(np.rad2deg(np.median(d))))
-        
+
         cbar.colorbar(im)
         cbar.set_ylabel(mapping[key])
-        
+
         if "angle" == key:
             cbar.remove()
             grid[0].set_ylabel(mapping[key])
-    
+
     return fig, grid
 
 
 def stitch_img(infile, labelfile, outfile, num_threads=1):
-    '''
+    """
     Run the stitching algorithm
 
     More info can be found [here](https://github.com/mkazhdan/DMG)
@@ -1624,29 +1636,38 @@ def stitch_img(infile, labelfile, outfile, num_threads=1):
         Output from client
     server_return_code : string
         Output from server
-    '''
+    """
     # choose a communication port not in use
     COM_PORT = "12345"
     # set up client execution
     client_exc_str = [
-        r"C:\DMG\ClientSocket.exe",     # binary location
-        "--address", "127.0.0.1",       # address for client, points HOME
-        "--port", COM_PORT,             # port to communicate over
-        "--labels", labelfile,          # where's the label file, path
-        "--pixels", infile,             # where's the input file, path
-        "--threads", str(num_threads),  # How many threads to use for computation
-        "--inCore",                     # tell algo to perform all computations in memory, __DO NOT__ stream to disk
-        "--out", outfile,               # where do you want output
-        "--hdr"                         # tell algorithm to use full 16 bit depth
+        r"C:\DMG\ClientSocket.exe",  # binary location
+        "--address",
+        "127.0.0.1",  # address for client, points HOME
+        "--port",
+        COM_PORT,  # port to communicate over
+        "--labels",
+        labelfile,  # where's the label file, path
+        "--pixels",
+        infile,  # where's the input file, path
+        "--threads",
+        str(num_threads),  # How many threads to use for computation
+        "--inCore",  # tell algo to perform all computations in memory, __DO NOT__ stream to disk
+        "--out",
+        outfile,  # where do you want output
+        "--hdr",  # tell algorithm to use full 16 bit depth
     ]
     # set up server execution
     server_exc_str = [
-        r"C:\DMG\ServerSocket.exe", # binary location
-        "--count", "1",             # how many connections to expect
-        "--port", COM_PORT,         # port to communicate over
-        "--verbose",                # tell me what I'm doing
-        "--tileExt", "tif",         # what file am I working with
-        "--gray"                    # gray scale images, not color
+        r"C:\DMG\ServerSocket.exe",  # binary location
+        "--count",
+        "1",  # how many connections to expect
+        "--port",
+        COM_PORT,  # port to communicate over
+        "--verbose",  # tell me what I'm doing
+        "--tileExt",
+        "tif",  # what file am I working with
+        "--gray",  # gray scale images, not color
     ]
     # both programs need to run concurrently so
     with subprocess.Popen(server_exc_str, stdout=subprocess.PIPE) as server:
@@ -1658,19 +1679,19 @@ def stitch_img(infile, labelfile, outfile, num_threads=1):
 
 
 def stitch_tiled_sim_img(sim_img_path, tile_size=None):
-    '''
+    """
     A utility function to run the DMG stitching program on SIM data.
-    '''
+    """
     # determin tile_size from file name if not given
     if tile_size is None:
         # make a regex
-        tile_re = re.compile(r'(?<=proc)\d+')
+        tile_re = re.compile(r"(?<=proc)\d+")
         # apply it, there should only be one occurance
         re_result = re.findall(tile_re, sim_img_path)
         assert len(re_result) == 1, "More than one Regex found."
         tile_size = int(re_result[0])
     # prep the image to stitch
-    to_stitch_path = sim_img_path.replace('.mrc', '.tif')
+    to_stitch_path = sim_img_path.replace(".mrc", ".tif")
     # open the Mrc
     junk_mrc = Mrc.Mrc(sim_img_path)
     # pull data
@@ -1681,11 +1702,11 @@ def stitch_tiled_sim_img(sim_img_path, tile_size=None):
     # kill Mrc
     del junk_mrc
     head, tail = os.path.split(sim_img_path)
-    label_file = head + os.path.sep + 'labels.tif'
+    label_file = head + os.path.sep + "labels.tif"
     tif.imsave(label_file, labels)
     assert os.path.exists(label_file), label_file + " doesn't exist!"
     # prep outfile
-    outfile = to_stitch_path.replace('.tif', '_stitch.tif')
+    outfile = to_stitch_path.replace(".tif", "_stitch.tif")
     # stitch
     return_codes = stitch_img(to_stitch_path, label_file, outfile)
     return return_codes
@@ -1693,6 +1714,10 @@ def stitch_tiled_sim_img(sim_img_path, tile_size=None):
 
 def make_label_img(img_size, tile_size):
     # double tile size because SIM
-    labels = np.array([np.ones((tile_size * 2, tile_size * 2), np.uint16) * i
-                       for i in range((img_size // tile_size)**2)])
+    labels = np.array(
+        [
+            np.ones((tile_size * 2, tile_size * 2), np.uint16) * i
+            for i in range((img_size // tile_size) ** 2)
+        ]
+    )
     return combine_img(labels)

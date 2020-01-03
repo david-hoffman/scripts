@@ -91,9 +91,9 @@ try:
 except ImportError:
     import ndimage.interpolation as ndii
 
-__version__ = '2013.01.18'
-__docformat__ = 'restructuredtext en'
-__all__ = ['translation', 'similarity']
+__version__ = "2013.01.18"
+__docformat__ = "restructuredtext en"
+__all__ = ["translation", "similarity"]
 
 
 def translation(im0, im1):
@@ -163,15 +163,15 @@ def similarity(im0, im1):
     elif angle > 90.0:
         angle -= 180.0
 
-    im2 = ndii.zoom(im1, 1.0/scale)
+    im2 = ndii.zoom(im1, 1.0 / scale)
     im2 = ndii.rotate(im2, angle)
 
     if im2.shape < im0.shape:
         t = numpy.zeros_like(im0)
-        t[:im2.shape[0], :im2.shape[1]] = im2
+        t[: im2.shape[0], : im2.shape[1]] = im2
         im2 = t
     elif im2.shape > im0.shape:
-        im2 = im2[:im0.shape[0], :im0.shape[1]]
+        im2 = im2[: im0.shape[0], : im0.shape[1]]
 
     f0 = fft2(im0)
     f1 = fft2(im2)
@@ -188,10 +188,10 @@ def similarity(im0, im1):
     # correct parameters for ndimage's internal processing
     if angle > 0.0:
         d = int((int(im1.shape[1] / scale) * math.sin(math.radians(angle))))
-        t0, t1 = t1, d+t0
+        t0, t1 = t1, d + t0
     elif angle < 0.0:
         d = int((int(im1.shape[0] / scale) * math.sin(math.radians(angle))))
-        t0, t1 = d+t1, d+t0
+        t0, t1 = d + t1, d + t0
     scale = (im1.shape[1] - 1) / (int(im1.shape[1] / scale) - 1)
 
     return im2, scale, angle, [-t0, -t1]
@@ -228,12 +228,11 @@ def logpolar(image, angles=None, radii=None):
         radii = shape[1]
     theta = numpy.empty((angles, radii), dtype=numpy.float64)
     theta.T[:] = -numpy.linspace(0, numpy.pi, angles, endpoint=False)
-    #d = radii
-    d = numpy.hypot(shape[0]-center[0], shape[1]-center[1])
+    # d = radii
+    d = numpy.hypot(shape[0] - center[0], shape[1] - center[1])
     log_base = 10.0 ** (math.log10(d) / (radii))
     radius = numpy.empty_like(theta)
-    radius[:] = numpy.power(log_base, numpy.arange(radii,
-                                                   dtype=numpy.float64)) - 1.0
+    radius[:] = numpy.power(log_base, numpy.arange(radii, dtype=numpy.float64)) - 1.0
     x = radius * numpy.sin(theta) + center[0]
     y = radius * numpy.cos(theta) + center[1]
     output = numpy.empty_like(x)
@@ -244,16 +243,17 @@ def logpolar(image, angles=None, radii=None):
 def highpass(shape):
     """Return highpass filter to be multiplied with fourier transform."""
     x = numpy.outer(
-        numpy.cos(numpy.linspace(-math.pi/2., math.pi/2., shape[0])),
-        numpy.cos(numpy.linspace(-math.pi/2., math.pi/2., shape[1])))
+        numpy.cos(numpy.linspace(-math.pi / 2.0, math.pi / 2.0, shape[0])),
+        numpy.cos(numpy.linspace(-math.pi / 2.0, math.pi / 2.0, shape[1])),
+    )
     return (1.0 - x) * (2.0 - x)
 
 
 def imread(fname, norm=True):
     """Return image data from img&hdr uint8 files."""
-    with open(fname+'.hdr', 'r') as fh:
+    with open(fname + ".hdr", "r") as fh:
         hdr = fh.readlines()
-    img = numpy.fromfile(fname+'.img', numpy.uint8, -1)
+    img = numpy.fromfile(fname + ".img", numpy.uint8, -1)
     img.shape = int(hdr[4].split()[-1]), int(hdr[3].split()[-1])
     if norm:
         img = img.astype(numpy.float64)
@@ -264,8 +264,9 @@ def imread(fname, norm=True):
 def imshow(im0, im1, im2, im3=None, cmap=None, **kwargs):
     """Plot images using matplotlib."""
     from matplotlib import pyplot
+
     if cmap is None:
-        cmap = 'coolwarm'
+        cmap = "coolwarm"
     if im3 is None:
         im3 = abs(im2 - im0)
     pyplot.subplot(221)
