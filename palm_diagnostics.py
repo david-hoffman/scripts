@@ -186,13 +186,13 @@ def remove_fiducials(df, yx_shape, df2=None, exclusion_radius=1, **kwargs):
 
 class cached_property(object):
     """ A property that is only computed once per instance and then replaces
-        itself with an ordinary attribute. Deleting the attribute resets the
-        property.
+    itself with an ordinary attribute. Deleting the attribute resets the
+    property.
 
-        Source: https://github.com/bottlepy/bottle/commit/fa7733e075da0d790d809aa3d2f53071897e6f76
-        
-        This will be part of the standard library starting in 3.8
-        """
+    Source: https://github.com/bottlepy/bottle/commit/fa7733e075da0d790d809aa3d2f53071897e6f76
+    
+    This will be part of the standard library starting in 3.8
+    """
 
     def __init__(self, func):
         self.__doc__ = getattr(func, "__doc__")
@@ -2291,7 +2291,7 @@ def cluster_groups(df, *args, affinity="distance", diagnostics=False, **kwargs):
         # amat = np.exp(np.exp(-mat) - 1)
         amat = np.exp(-mat) - 1
     else:
-        amat = np.exp(-mat ** 2)
+        amat = np.exp(-(mat ** 2))
 
     amat[~np.isfinite(amat)] = -1e16
 
@@ -2440,7 +2440,7 @@ def fit_and_plot_power_law(trace, ul, offset, xmax, ll=None, ax=None, density=Fa
 def stretched_exp(tdata, tau, beta):
     """A streched exponential distribution"""
     mean_tau = tau * gamma(1 + 1 / beta)
-    return np.exp(-(tdata / tau) ** beta) / mean_tau
+    return np.exp(-((tdata / tau) ** beta)) / mean_tau
 
 
 def power_law_cont(tdata, alpha, tmin=1):
