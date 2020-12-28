@@ -10,7 +10,7 @@ Copyright (c) 2017, David Hoffman
 import click
 import os
 import glob
-from skimage.external import tifffile as tif
+import tifffile as tif
 import dask
 import dask.multiprocessing
 from dask.diagnostics import ProgressBar

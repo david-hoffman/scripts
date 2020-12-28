@@ -70,14 +70,10 @@ def calc_molarity(num_part):
 
 @click.group("name")
 def main():
-    """Parameters
-    ----------
-    concentration : float
-        Concentration of solution in g/mL
-    diameter : float
-        diameter of the beads in microns
-    rho : float
-        density of beads in g/mL (default: 1.05 for polystyrene)"""
+    """Main
+    
+    Concentration of solution in g/mL
+    """
     pass
 
 
@@ -87,7 +83,7 @@ def sub_molarity(diameter, concentration, rho):
     mol = calc_molarity(num_part)
     click.echo(
         (
-            "For a bead diameter of {} um and a concentration of {} "
+            "For a bead diameter of {} µm and a concentration of {} "
             "g/mL you have a {:.3f} pM solution"
         ).format(diameter, concentration, mol)
     )
@@ -96,17 +92,31 @@ def sub_molarity(diameter, concentration, rho):
 
 @main.command()
 @click.argument("diameter", type=float)
-@click.argument("concentration", type=float)
-@click.option("--rho", default=1.05, type=float)
+@click.argument(
+    "concentration", type=float,
+)
+@click.option(
+    "--rho",
+    default=1.05,
+    type=float,
+    help="density of beads in g/mL (default: 1.05 for polystyrene)",
+)
 def molarity(diameter, concentration, rho):
     sub_molarity(diameter, concentration, rho)
 
 
 @main.command()
 @click.argument("diameter", type=float)
-@click.argument("concentration", type=float)
+@click.argument(
+    "concentration", type=float,
+)
 @click.argument("desired", type=float)
-@click.option("--rho", default=1.05, type=float)
+@click.option(
+    "--rho",
+    default=1.05,
+    type=float,
+    help="density of beads in g/mL (default: 1.05 for polystyrene)",
+)
 def dilution(diameter, concentration, desired, rho):
     """Calculate the molarity of solution everything in pM"""
     mol = sub_molarity(diameter, concentration, rho=rho)

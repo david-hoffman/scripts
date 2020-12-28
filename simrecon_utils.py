@@ -52,7 +52,7 @@ try:
     pyfftw.interfaces.cache.enable()
 except ImportError:
     from numpy.fft import fftshift, ifftshift, fftn, ifftn, rfftn, fftfreq, rfftfreq
-from skimage.external import tifffile as tif
+import tifffile as tif
 
 import logging
 

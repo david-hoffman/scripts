@@ -39,7 +39,7 @@ if __name__ == "__main__":
     try:
         if ".tif" in filename or ".tiff" in filename:
             # Import skimage so we have access to tiff loading
-            from skimage.external import tifffile as tif
+            import tifffile as tif
 
             # here's the real danger zone, did the user give us a real file?
             try:

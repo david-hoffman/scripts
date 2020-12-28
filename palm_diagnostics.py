@@ -23,7 +23,7 @@ import matplotlib.lines as mlines
 
 # data loading
 from scipy.io import readsav
-from skimage.external import tifffile as tif
+import tifffile as tif
 from skimage.filters import thresholding
 from skimage.draw import circle
 
@@ -659,7 +659,7 @@ class PALMData(object):
                 self.drift_corrected, zscaling=self.zscaling, drift=self.residual_drift
             )
         except AttributeError:
-            logger.warn("No residual drift yet")
+            logger.warning("No residual drift yet")
             return estimate_grouping_radius(
                 self.drift_corrected, zscaling=self.zscaling, drift=None
             )
@@ -2649,7 +2649,7 @@ def plot_blinks(
             err = e
             continue
     else:
-        logger.warn(err)
+        logger.warning(err)
         alpha = mu = None
     # calculate histograms
     x = np.arange(blinks.max() + 1)[1:]

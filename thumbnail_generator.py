@@ -9,7 +9,7 @@ import warnings
 import numpy as np
 import matplotlib as mpl
 import multiprocessing as mp
-from skimage.external import tifffile as tif
+import tifffile as tif
 from skimage.exposure import adjust_gamma
 from dphplotting import display_grid
 

@@ -10,7 +10,7 @@ import os
 import glob
 import re
 import numpy as np
-import skimage.external.tifffile as tif
+import tifffile as tif
 
 # import our ability to read and write MRC files
 import Mrc

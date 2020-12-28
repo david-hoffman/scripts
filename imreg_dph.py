@@ -373,7 +373,7 @@ if __name__ == "__main__":
     import os
     import warnings
     import glob
-    import skimage.external.tifffile as tif
+    import tifffile as tif
     import dask
     from dask.diagnostics import ProgressBar
 
